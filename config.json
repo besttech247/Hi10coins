@@ -1,7 +1,7 @@
 {
   "PAPER_TRADING": false,
-  "MEXC_API_KEY": "ضع_مفتاح_API_الخاص_بك_هنا",
-  "MEXC_API_SECRET": "ضع_مفتاح_SECRET_الخاص_بك_هنا",
+  "MEXC_API_KEY": "mx0vgleUUcFQPbkjBf",
+  "MEXC_API_SECRET": "40d27ec00fe64529b6d0426f77d83072",
   "INITIAL_CAPITAL": 500.0,
   "TRADE_SIZE_USDT": 10.0,
   "STOP_LOSS_PCT": 0.0049,
