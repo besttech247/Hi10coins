@@ -1,439 +1,362 @@
-import os
-import urllib.request
-import json
-import time
+import http.server
+import socketserver
 import threading
+import json
+import urllib.request
+import urllib.parse
+import ssl
+import time
+import hmac
+import hashlib
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ==========================================
-# 1. الإعدادات العامة للمحفظة والاستراتيجية
-# ==========================================
-CAPITAL = 500.0
-TRADE_SIZE = 50.0
-MAX_CONCURRENT_PER_SYM = 3
-STOP_LOSS_PCT = 0.49
-DAILY_TARGET_CAP = 5.0
-LOOP_INTERVAL = 15
-DISCONNECT_THRESHOLD = 35
+# =====================================================================
+# ⚙️ إعدادات التداول والوضع التجريبي (Paper Trading)
+# =====================================================================
+PAPER_TRADING = True         # True = تداول تجريبي بمحاكاة حية / False = تداول حقيقي بـ API
+INITIAL_BALANCE = 500.00     # رصيد المحفظة الافتراضي للبدء ($)
 
-TARGET_SYMBOLS = ["PAXGUSDT", "XAUTUSDT"]
+# مفاتيح API (مطلوبة فقط عند تحويل PAPER_TRADING = False)
+API_KEY = "YOUR_MEXC_API_KEY"
+API_SECRET = "YOUR_MEXC_API_SECRET"
+BASE_URL = "https://api.mexc.com"
+PORT = 8080
 
-# ==========================================
-# 2. حالة البوت
-# ==========================================
+# قائمة الـ 10 عملات المعتمدة
+SYMBOLS = [
+    "NEARUSDT", "AVAXUSDT", "SOLUSDT", "DOGEUSDT", "BTCUSDT",
+    "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT"
+]
+
+TRADE_SIZE_USDT = 10.0      # حجم كل دخول (10$)
+MAX_CONCURRENT_PER_COIN = 5 # أقصى صفقات متزامنة لكل عملة
+STOP_LOSS_PCT = 0.0049      # وقف خسارة ثابت -0.49%
+
+# سقف الأهداف اليومية (حجز الأرباح وإعادة التعيين 00:00 UTC)
+DAILY_TARGET_PER_COIN = 1.50
+DAILY_TARGET_PORTFOLIO = 5.00
+
+ssl_ctx = ssl._create_unverified_context()
+
+# =====================================================================
+# 📊 الحالة العامة للمحفظة ولوحة التحكم
+# =====================================================================
 bot_state = {
-    "is_running": True,
-    "server_alive": True,
-    "gold_price": 0.0,
-    "last_gold_sync": "N/A",
-    "market_open": True,
-    "daily_realized_pnl": 0.0,
-    "total_realized_pnl": 0.0,
+    "paper_mode": PAPER_TRADING,
+    "virtual_balance": INITIAL_BALANCE,
     "current_day": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-    "positions": [],
-    "trade_history": [],
-    "ticker_data": {},
-    "last_signal": "None",
-    "candle_lock": {},
-    "status": "Online 🟢",
-    "last_successful_loop": time.time(),
-    "total_downtime_sec": 0,
-    "outages": []
+    "daily_pnl_portfolio": 0.0,
+    "total_realized_pnl": 0.0,
+    "total_trades_count": 0,
+    "winning_trades_count": 0,
+    "daily_pnl_coins": {sym: 0.0 for sym in SYMBOLS},
+    "active_positions": {sym: [] for sym in SYMBOLS},
+    "market_prices": {sym: {"bid": 0.0, "ask": 0.0} for sym in SYMBOLS},
+    "recent_logs": []
 }
 
-lock = threading.Lock()
+def add_log(msg, log_type="info"):
+    timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    bot_state["recent_logs"].insert(0, {"time": timestamp, "msg": msg, "type": log_type})
+    if len(bot_state["recent_logs"]) > 50:
+        bot_state["recent_logs"].pop()
 
-# ==========================================
-# 3. دوال جلب البيانات
-# ==========================================
-def fetch_gold_candles():
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=5m&range=2d"
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+# =====================================================================
+# 📡 دوال جلب الأسعار والشموع المباشرة
+# =====================================================================
+def get_orderbook(symbol):
     try:
-        with urllib.request.urlopen(req, timeout=6) as res:
-            data = json.loads(res.read().decode('utf-8'))
-            result = data['chart']['result'][0]
-            timestamps = result['timestamp']
-            q = result['indicators']['quote'][0]
-            candles = []
-            for t, c, h, l in zip(timestamps, q['close'], q['high'], q['low']):
-                if c is not None and h is not None and l is not None:
-                    candles.append({
-                        "time": datetime.fromtimestamp(t, timezone.utc),
-                        "close": c,
-                        "hl2": (h + l) / 2.0
-                    })
-            return candles
-    except Exception as e:
-        raise ConnectionError(f"Yahoo Feed: {e}")
-
-def fetch_mexc_ticker(symbol):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        url_bin = f"https://data-api.binance.vision/api/v3/ticker/price?symbol={symbol}"
-        req_b = urllib.request.Request(url_bin, headers=headers)
-        with urllib.request.urlopen(req_b, timeout=4) as res:
-            data = json.loads(res.read().decode('utf-8'))
-            if 'price' in data:
-                p = float(data['price'])
-                return {"bid": round(p * 0.9999, 2), "ask": round(p * 1.0001, 2)}
+        url = f"{BASE_URL}/api/v3/ticker/bookTicker?symbol={symbol}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=5) as res:
+            d = json.loads(res.read().decode('utf-8'))
+            return float(d['bidPrice']), float(d['askPrice'])
     except Exception:
-        pass
+        return None, None
 
+def fetch_klines(symbol):
     try:
-        url_mexc = "https://api.mexc.com/api/v3/ticker/price"
-        req_m = urllib.request.Request(url_mexc, headers=headers)
-        with urllib.request.urlopen(req_m, timeout=5) as res:
+        url = f"{BASE_URL}/api/v3/klines?symbol={symbol}&interval=5m&limit=45"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=8) as res:
             data = json.loads(res.read().decode('utf-8'))
-            for item in data:
-                if item.get('symbol') == symbol:
-                    p = float(item['price'])
-                    return {"bid": round(p * 0.9999, 2), "ask": round(p * 1.0001, 2)}
+            return [{'open': float(r[1]), 'high': float(r[2]), 'low': float(r[3]), 'close': float(r[4])} for r in data]
     except Exception:
-        pass
-
-    raise ConnectionError(f"Market Feed ({symbol}) unavailable")
+        return []
 
 def calculate_ewo(candles):
-    if len(candles) < 35:
+    if len(candles) < 38:
         return None, None, None
-    hl2_list = [c['hl2'] for c in candles]
-    ewo_vals = []
+    medians = [(c['high'] + c['low']) / 2.0 for c in candles]
+    vals = []
     for offset in [3, 2, 1]:
-        idx = len(candles) - offset
-        sma5 = sum(hl2_list[idx-4:idx+1]) / 5.0
-        sma35 = sum(hl2_list[idx-34:idx+1]) / 35.0
-        ewo_vals.append(sma5 - sma35)
-    return ewo_vals[2], ewo_vals[1], ewo_vals[0]
+        sub = medians[:len(candles) - offset + 1]
+        sma5 = sum(sub[-5:]) / 5.0
+        sma35 = sum(sub[-35:]) / 35.0
+        vals.append(sma5 - sma35)
+    return vals[0], vals[1], vals[2]
 
-def is_market_open():
-    now_utc = datetime.now(timezone.utc)
-    weekday = now_utc.weekday()
-    hour = now_utc.hour
-    if weekday == 4 and hour >= 22: return False
-    if weekday == 5: return False
-    if weekday == 6 and hour < 22: return False
-    return True
-
-def format_duration(seconds):
-    mins, secs = divmod(int(seconds), 60)
-    hours, mins = divmod(mins, 60)
-    if hours > 0: return f"{hours}h {mins}m {secs}s"
-    elif mins > 0: return f"{mins}m {secs}s"
-    else: return f"{secs}s"
-
-# ==========================================
-# 4. محرك التداول
-# ==========================================
-def trading_engine():
-    print("🚀 محرك التداول يعمل على Railway...")
-    last_loop_start = time.time()
+# =====================================================================
+# 🔄 محرك التداول (Paper Trading Engine)
+# =====================================================================
+def trading_loop():
+    add_log(f"تم بدء التداول التجريبي المباشر برصيد {INITIAL_BALANCE:.2f}$ على 10 عملات", "success")
     
-    while bot_state["server_alive"]:
-        if not bot_state["is_running"]:
-            time.sleep(2)
-            last_loop_start = time.time()
-            continue
-
-        loop_start = time.time()
-        gap = loop_start - last_loop_start
-        if gap > DISCONNECT_THRESHOLD:
-            outage_duration = gap - LOOP_INTERVAL
-            outage_time = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
-            with lock:
-                bot_state["total_downtime_sec"] += outage_duration
-                bot_state["outages"].insert(0, {
-                    "time": outage_time,
-                    "duration": format_duration(outage_duration),
-                    "reason": "إعادة تشغيل الحاوية / انقطاع"
-                })
-
+    while True:
         try:
-            today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-            with lock:
-                if today_str != bot_state["current_day"]:
-                    bot_state["current_day"] = today_str
-                    bot_state["daily_realized_pnl"] = 0.0
-                    bot_state["candle_lock"].clear()
-                bot_state["market_open"] = is_market_open()
+            now_day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            if now_day != bot_state["current_day"]:
+                add_log(f"🌅 بداية يوم تداول جديد ({now_day} UTC) - تصفير الأهداف اليومية", "info")
+                bot_state["current_day"] = now_day
+                bot_state["daily_pnl_portfolio"] = 0.0
+                bot_state["daily_pnl_coins"] = {sym: 0.0 for sym in SYMBOLS}
 
-            tickers = {}
-            for sym in TARGET_SYMBOLS:
-                try:
-                    tk = fetch_mexc_ticker(sym)
-                    if tk: tickers[sym] = tk
-                except Exception:
-                    pass
+            port_target_locked = bot_state["daily_pnl_portfolio"] >= DAILY_TARGET_PORTFOLIO
 
-            candles = fetch_gold_candles()
-            
-            if tickers and candles:
-                with lock:
-                    bot_state["status"] = "Online 🟢" if bot_state["is_running"] else "Paused ⏸️"
-                    bot_state["last_successful_loop"] = time.time()
-                    bot_state["ticker_data"] = tickers
+            for sym in SYMBOLS:
+                bid, ask = get_orderbook(sym)
+                if bid and ask:
+                    bot_state["market_prices"][sym] = {"bid": bid, "ask": ask}
 
-                last_candle = candles[-1]
-                ewo_now, ewo_p1, ewo_p2 = calculate_ewo(candles)
-                
-                with lock:
-                    bot_state["gold_price"] = last_candle["close"]
-                    bot_state["last_gold_sync"] = last_candle["time"].strftime('%H:%M:%S UTC')
-                
-                buy_signal = (ewo_now is not None and ewo_now < 0 and ewo_now > ewo_p1 and ewo_p1 <= ewo_p2)
-                sell_signal = (ewo_now is not None and ewo_now > 0 and ewo_now < ewo_p1)
-                
-                with lock:
-                    if buy_signal: bot_state["last_signal"] = "BUY REBOUND"
-                    elif sell_signal: bot_state["last_signal"] = "SELL MOMENTUM"
-                    else: bot_state["last_signal"] = "NEUTRAL"
+                candles = fetch_klines(sym)
+                if not candles or not bid:
+                    continue
 
-                # فحص الخروج
-                with lock:
-                    remaining_pos = []
-                    for pos in bot_state["positions"]:
-                        sym = pos["symbol"]
-                        if sym in tickers:
-                            curr_ask = tickers[sym]["ask"]
-                            pnl_pct = ((curr_ask - pos["entry_price"]) / pos["entry_price"]) * 100.0
-                            hit_sl = pnl_pct <= -STOP_LOSS_PCT
-                            hit_tp = sell_signal
-                            
-                            if hit_sl or hit_tp:
-                                pnl_usd = (pnl_pct / 100.0) * TRADE_SIZE
-                                bot_state["daily_realized_pnl"] += pnl_usd
-                                bot_state["total_realized_pnl"] += pnl_usd
-                                bot_state["trade_history"].insert(0, {
-                                    "symbol": sym,
-                                    "entry_time": pos["time"],
-                                    "exit_time": datetime.now(timezone.utc).strftime('%H:%M:%S'),
-                                    "entry_p": pos["entry_price"],
-                                    "exit_p": curr_ask,
-                                    "pnl_pct": pnl_pct,
-                                    "pnl_usd": pnl_usd,
-                                    "reason": "SL" if hit_sl else "TP"
-                                })
-                            else:
-                                remaining_pos.append(pos)
-                        else:
-                            remaining_pos.append(pos)
-                    bot_state["positions"] = remaining_pos
+                e3, e2, e1 = calculate_ewo(candles)
+                if e1 is None:
+                    continue
 
-                # فحص الدخول
-                if bot_state["market_open"] and buy_signal and bot_state["is_running"]:
-                    with lock:
-                        target_ok = bot_state["daily_realized_pnl"] < DAILY_TARGET_CAP
-                        candle_id = last_candle["time"].strftime('%Y%m%d%H%M')
-                        if target_ok:
-                            for sym in TARGET_SYMBOLS:
-                                if sym in tickers:
-                                    sym_count = len([p for p in bot_state["positions"] if p["symbol"] == sym])
-                                    not_locked = bot_state["candle_lock"].get(sym) != candle_id
-                                    if sym_count < MAX_CONCURRENT_PER_SYM and not_locked:
-                                        entry_maker_price = tickers[sym]["bid"]
-                                        bot_state["positions"].append({
-                                            "symbol": sym,
-                                            "time": datetime.now(timezone.utc).strftime('%H:%M:%S'),
-                                            "entry_price": entry_maker_price,
-                                            "size_usd": TRADE_SIZE
-                                        })
-                                        bot_state["candle_lock"][sym] = candle_id
-                                        print(f"✅ [ENTRY MAKER] {sym} @ {entry_maker_price}$")
+                # 1. إدارة وإغلاق الصفقات المفتوحة
+                still_open = []
+                for pos in bot_state["active_positions"][sym]:
+                    entry = pos['entry_price']
+                    qty = pos['qty']
+                    sl = entry * (1.0 - STOP_LOSS_PCT)
 
-        except ConnectionError:
-            with lock: bot_state["status"] = "Offline / Feed Error 🔴"
+                    # تحقق ضرب وقف الخسارة
+                    if bid <= sl:
+                        pnl = (bid - entry) * qty
+                        bot_state["virtual_balance"] += (TRADE_SIZE_USDT + pnl)
+                        bot_state["daily_pnl_portfolio"] += pnl
+                        bot_state["total_realized_pnl"] += pnl
+                        bot_state["daily_pnl_coins"][sym] += pnl
+                        bot_state["total_trades_count"] += 1
+                        add_log(f"🛑 ضرب الوقف لـ {sym} عند {bid}$ (PnL: {pnl:+.3f}$)", "danger")
+
+                    # تحقق جني الأرباح بزخم EWO
+                    elif (e2 > 0) and (e1 < e2):
+                        pnl = (ask - entry) * qty
+                        bot_state["virtual_balance"] += (TRADE_SIZE_USDT + pnl)
+                        bot_state["daily_pnl_portfolio"] += pnl
+                        bot_state["total_realized_pnl"] += pnl
+                        bot_state["daily_pnl_coins"][sym] += pnl
+                        bot_state["total_trades_count"] += 1
+                        bot_state["winning_trades_count"] += 1
+                        add_log(f"🎯 جني أرباح EWO لـ {sym} عند {ask}$ (PnL: {pnl:+.3f}$)", "success")
+                    else:
+                        still_open.append(pos)
+
+                bot_state["active_positions"][sym] = still_open
+
+                # 2. فحص الدخول في صفقات جديدة
+                coin_target_locked = bot_state["daily_pnl_coins"][sym] >= DAILY_TARGET_PER_COIN
+                sig_rebound = (e1 < 0) and (e1 > e2) and (e2 <= e3)
+                can_open = len(bot_state["active_positions"][sym]) < MAX_CONCURRENT_PER_COIN
+                has_balance = bot_state["virtual_balance"] >= TRADE_SIZE_USDT
+
+                if sig_rebound and can_open and has_balance and not port_target_locked and not coin_target_locked:
+                    buy_price = bid
+                    qty = round(TRADE_SIZE_USDT / buy_price, 4)
+                    
+                    bot_state["virtual_balance"] -= TRADE_SIZE_USDT
+                    bot_state["active_positions"][sym].append({
+                        'entry_price': buy_price,
+                        'qty': qty,
+                        'time': datetime.now(timezone.utc).strftime("%H:%M:%S")
+                    })
+                    add_log(f"🚀 شراء تجريبي لـ {sym} بسعر {buy_price}$ ({len(bot_state['active_positions'][sym])}/{MAX_CONCURRENT_PER_COIN})", "primary")
+
         except Exception as e:
-            print(f"❌ خطأ: {e}")
+            add_log(f"تنبيه محرك التداول: {e}", "warning")
             
-        last_loop_start = time.time()
-        time.sleep(LOOP_INTERVAL)
+        time.sleep(12)
 
-# ==========================================
-# 5. لوحة التحكم
-# ==========================================
-class ReusableHTTPServer(HTTPServer):
-    allow_reuse_address = True
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html dir="rtl" lang="ar">
+# =====================================================================
+# 🌐 واجهة التحكم المباشرة (Dashboard UI)
+# =====================================================================
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gold Trading Bot - Railway</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 15px; }
-        .card { background: #1e293b; border-radius: 12px; padding: 15px; margin-bottom: 15px; border: 1px solid #334155; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
-        .stat-box { background: #0f172a; padding: 10px; border-radius: 8px; text-align: center; }
-        .val { font-size: 1.15rem; font-weight: bold; margin-top: 5px; }
-        .green { color: #22c55e; } .red { color: #ef4444; } .gold { color: #eab308; } .orange { color: #f97316; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85rem; }
-        th, td { padding: 8px; text-align: right; border-bottom: 1px solid #334155; }
-        th { color: #94a3b8; }
-        .badge { padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; }
-        .badge-buy { background: #166534; color: #86efac; }
-        .badge-sell { background: #991b1b; color: #fca5a5; }
-        .badge-neu { background: #334155; color: #cbd5e1; }
-        .btn { padding: 8px 16px; border-radius: 8px; border: none; font-weight: bold; cursor: pointer; text-decoration: none; display: inline-block; }
-        .btn-pause { background: #eab308; color: #0f172a; }
-        .btn-resume { background: #22c55e; color: #ffffff; }
-    </style>
-    <script>setTimeout(() => { location.reload(); }, 6000);</script>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>EWO Bot Dashboard - Live Paper Trading</title>
+<style>
+:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
+*{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--text);padding:14px;line-height:1.5}
+.container{max-width:960px;margin:0 auto}
+.header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;background:var(--card);border-radius:14px;border:1px solid var(--border);margin-bottom:14px}
+.pill{background:#10b98122;color:var(--success);padding:4px 12px;border-radius:20px;font-size:12px;font-weight:bold;display:flex;align-items:center;gap:6px}
+.pill::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--success);display:inline-block}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px}
+.card-title{font-size:12px;color:var(--sub);margin-bottom:4px}
+.card-val{font-size:22px;font-weight:bold}
+.progress-bar{height:6px;background:#1f293d;border-radius:3px;margin-top:8px;overflow:hidden}
+.progress-fill{height:100%;background:var(--primary);transition:width .4s}
+.table-wrap{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow-x:auto;margin-bottom:14px}
+table{width:100%;border-collapse:collapse;text-align:right}
+th,td{padding:10px 14px;font-size:13px;border-bottom:1px solid var(--border)}
+th{color:var(--sub);font-weight:600}
+.badge{padding:2px 8px;border-radius:6px;font-size:11px;font-weight:bold}
+.badge-active{background:#10b98122;color:var(--success)}
+.badge-idle{background:#64748b22;color:var(--sub)}
+.logs{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:12px;max-height:240px;overflow-y:auto;font-family:monospace;font-size:12px}
+.log-row{display:flex;gap:10px;padding:4px 0;border-bottom:1px solid #1f293d44}
+.log-time{color:var(--sub)}
+</style>
 </head>
 <body>
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <h2 style="margin:0;">🟡 لوحة تحكم تداول الذهب (Railway)</h2>
-        <a href="${ACTION_URL}" class="btn ${ACTION_CLASS}">${ACTION_TEXT}</a>
+<div class="container">
+  <div class="header">
+    <div>
+      <h2 style="font-size:17px">🤖 EWO Momentum Bot (Paper Trading)</h2>
+      <p style="font-size:12px;color:var(--sub)">محاكاة حية على 10 عملات ببيانات السوق اللحظية</p>
     </div>
+    <div class="pill">وضع المحاكاة نشط</div>
+  </div>
 
+  <div class="grid">
     <div class="card">
-        <div class="grid">
-            <div class="stat-box">
-                <div style="color:#94a3b8; font-size:0.8rem;">حالة البوت</div>
-                <div class="val">${BOT_STATUS}</div>
-            </div>
-            <div class="stat-box">
-                <div style="color:#94a3b8; font-size:0.8rem;">سعر الذهب (XAU)</div>
-                <div class="val gold">${GOLD_PRICE}</div>
-            </div>
-            <div class="stat-box">
-                <div style="color:#94a3b8; font-size:0.8rem;">أرباح اليوم</div>
-                <div class="val ${DAILY_COLOR}">${DAILY_PNL}$</div>
-            </div>
-            <div class="stat-box">
-                <div style="color:#94a3b8; font-size:0.8rem;">إجمالي وقت التوقف</div>
-                <div class="val orange">${TOTAL_DOWNTIME}</div>
-            </div>
-        </div>
+      <div class="card-title">رصيد المحفظة الافتراضي</div>
+      <div class="card-val" id="balance-val">500.00$</div>
+      <div style="font-size:11px;color:var(--sub);margin-top:4px">الرصيد الأساسي: 500.00$</div>
     </div>
+    <div class="card">
+      <div class="card-title">أرباح اليوم المحققة</div>
+      <div class="card-val" id="pnl-val">+0.00$</div>
+      <div class="progress-bar"><div class="progress-fill" id="pnl-bar" style="width:0%"></div></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:4px">
+        <span>الهدف: 5.00$</span><span id="pnl-pct">0%</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">نسبة الفوز الإجمالية</div>
+      <div class="card-val" id="win-rate">0.0%</div>
+      <div style="font-size:11px;color:var(--sub);margin-top:4px" id="trade-stats">0 صفقات منفذة</div>
+    </div>
+    <div class="card">
+      <div class="card-title">الصفقات والسيولة المفتوحة</div>
+      <div class="card-val" id="open-count">0</div>
+      <div style="font-size:11px;color:var(--sub);margin-top:4px" id="cap-used">0$ محجوزة في السوق</div>
+    </div>
+  </div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">📡 حالة الاتصال وسجل الانقطاعات (${OUTAGE_COUNT})</h3>
-        <div style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 8px;">
-            آخر فحص: <span style="color:#f8fafc;">${LAST_HEARTBEAT}</span> | حالة السوق: ${MARKET_STATUS}
-        </div>
-        <table>
-            <thead><tr><th>وقت الاستعادة</th><th>مدة التوقف</th><th>السبب</th></tr></thead>
-            <tbody>${OUTAGES_ROWS}</tbody>
-        </table>
-    </div>
+  <h3 style="font-size:14px;margin-bottom:8px">📊 حالة العملات العشر والصفقات الجارية</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>العملة</th><th>سعر السوق</th><th>ربح اليوم</th><th>الصفقات المفتوحة</th></tr>
+      </thead>
+      <tbody id="coin-rows"></tbody>
+    </table>
+  </div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">📊 أسعار العملات على MEXC وإشارة EWO</h3>
-        <div style="margin-bottom: 8px;">الإشارة: <span class="badge ${SIGNAL_BADGE}">${LAST_SIGNAL}</span> | آخر شمعة: ${LAST_SYNC}</div>
-        <table>
-            <thead><tr><th>العملة</th><th>سعر الشراء (Bid)</th><th>سعر البيع (Ask)</th></tr></thead>
-            <tbody>${TICKERS_ROWS}</tbody>
-        </table>
-    </div>
+  <h3 style="font-size:14px;margin-bottom:8px">📜 سجل العمليات الفورية (Live Events)</h3>
+  <div class="logs" id="log-box"></div>
+</div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">📂 الصفقات المفتوحة (${OPEN_COUNT})</h3>
-        <table>
-            <thead><tr><th>الرمز</th><th>وقت الدخول</th><th>سعر الدخول</th><th>الربح اللحظي</th></tr></thead>
-            <tbody>${POSITIONS_ROWS}</tbody>
-        </table>
-    </div>
-
-    <div class="card">
-        <h3 style="margin-top:0;">📜 سجل الصفقات المغلقة (آخر 5)</h3>
-        <table>
-            <thead><tr><th>الرمز</th><th>الخروج</th><th>الربح %</th><th>الربح $</th><th>السبب</th></tr></thead>
-            <tbody>${HISTORY_ROWS}</tbody>
-        </table>
-    </div>
+<script>
+async function refreshDashboard(){
+  try{
+    const res = await fetch('/api/data');
+    const d = await res.json();
+    
+    // الرصيد
+    document.getElementById('balance-val').innerText = d.virtual_balance.toFixed(2) + '$';
+    
+    // الأرباح والهدف اليومي
+    const pnl = d.daily_pnl_portfolio;
+    const pnlEl = document.getElementById('pnl-val');
+    pnlEl.innerText = (pnl>=0?'+':'') + pnl.toFixed(3) + '$';
+    pnlEl.style.color = pnl>=0?'var(--success)':'var(--danger)';
+    
+    const pct = Math.min(100, Math.max(0, (pnl / 5.0) * 100));
+    document.getElementById('pnl-bar').style.width = pct + '%';
+    document.getElementById('pnl-pct').innerText = pct.toFixed(0) + '%';
+    
+    // نسبة الفوز
+    const totalT = d.total_trades_count;
+    const winT = d.winning_trades_count;
+    const wr = totalT > 0 ? ((winT / totalT) * 100).toFixed(1) : '0.0';
+    document.getElementById('win-rate').innerText = wr + '%';
+    document.getElementById('trade-stats').innerText = `${totalT} صفقة (${winT} رابحة)`;
+    
+    // جدول العملات
+    let totalOpen = 0;
+    let rowsHtml = '';
+    
+    for(const sym of Object.keys(d.active_positions)){
+      const count = d.active_positions[sym].length;
+      totalOpen += count;
+      const coinPnl = d.daily_pnl_coins[sym] || 0;
+      const price = d.market_prices[sym] ? d.market_prices[sym].bid : 0;
+      
+      rowsHtml += `<tr>
+        <td><strong>${sym}</strong></td>
+        <td>${price ? price.toFixed(4)+'$' : '-'}</td>
+        <td style="color:${coinPnl>=0?'var(--success)':'var(--danger)'};font-weight:bold">${(coinPnl>=0?'+':'')+coinPnl.toFixed(3)}$</td>
+        <td><span class="badge ${count>0?'badge-active':'badge-idle'}">${count}/5 صفقات</span></td>
+      </tr>`;
+    }
+    
+    document.getElementById('coin-rows').innerHTML = rowsHtml;
+    document.getElementById('open-count').innerText = totalOpen + ' صفقات';
+    document.getElementById('cap-used').innerText = (totalOpen * 10) + '$ محجوزة في السوق';
+    
+    // السجلات
+    let logHtml = '';
+    for(const l of d.recent_logs){
+      logHtml += `<div class="log-row"><span class="log-time">[${l.time}]</span><span>${l.msg}</span></div>`;
+    }
+    document.getElementById('log-box').innerHTML = logHtml || '<div style="color:var(--sub)">في انتظار أول إشارة دخول...</div>';
+  }catch(e){}
+}
+setInterval(refreshDashboard, 2000);
+refreshDashboard();
+</script>
 </body>
-</html>
-"""
+</html>"""
 
-class DashboardHandler(BaseHTTPRequestHandler):
+class DashboardServer(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/toggle':
-            with lock:
-                bot_state["is_running"] = not bot_state["is_running"]
-                bot_state["status"] = "Online 🟢" if bot_state["is_running"] else "Paused ⏸️"
-            self.send_response(303)
-            self.send_header('Location', '/')
+        if self.path == '/api/data':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.end_headers()
-            return
-
-        with lock:
-            daily_color = "green" if bot_state["daily_realized_pnl"] >= 0 else "red"
-            market_text = '<span class="green">مفتوح 🟢</span>' if bot_state["market_open"] else '<span class="red">مغلق 🔴</span>'
-            sig = bot_state["last_signal"]
-            sig_badge = "badge-buy" if "BUY" in sig else ("badge-sell" if "SELL" in sig else "badge-neu")
-            
-            sec_since_hb = int(time.time() - bot_state["last_successful_loop"])
-            last_hb_str = f"منذ {sec_since_hb} ثانية" if sec_since_hb < 60 else f"منذ {sec_since_hb//60} دقيقة"
-
-            act_url = "/toggle"
-            act_text = "⏸️ إيقاف مؤقت" if bot_state["is_running"] else "▶️ تشغيل التداول"
-            act_class = "btn-pause" if bot_state["is_running"] else "btn-resume"
-
-            o_rows = ""
-            for out in bot_state["outages"][:5]:
-                o_rows += f"<tr><td>{out['time']}</td><td class='orange'>{out['duration']}</td><td>{out['reason']}</td></tr>"
-            if not o_rows:
-                o_rows = "<tr><td colspan='3' style='color:#22c55e;'>لم يتم رصد أي انقطاع ✨</td></tr>"
-
-            t_rows = ""
-            for sym, tk in bot_state["ticker_data"].items():
-                t_rows += f"<tr><td><b>{sym}</b></td><td>{tk['bid']:.2f}$</td><td>{tk['ask']:.2f}$</td></tr>"
-            if not t_rows: t_rows = "<tr><td colspan='3'>جاري جلب الأسعار...</td></tr>"
-
-            p_rows = ""
-            for p in bot_state["positions"]:
-                sym = p["symbol"]
-                curr_ask = bot_state["ticker_data"].get(sym, {}).get("ask", p["entry_price"])
-                upnl = ((curr_ask - p["entry_price"]) / p["entry_price"]) * 100.0
-                u_color = "green" if upnl >= 0 else "red"
-                p_rows += f"<tr><td><b>{sym}</b></td><td>{p['time']}</td><td>{p['entry_price']:.2f}$</td><td class='{u_color}'>{upnl:+.2f}%</td></tr>"
-            if not p_rows: p_rows = "<tr><td colspan='4'>لا توجد صفقات مفتوحة حالياً</td></tr>"
-
-            h_rows = ""
-            for h in bot_state["trade_history"][:5]:
-                h_col = "green" if h["pnl_usd"] >= 0 else "red"
-                h_rows += f"<tr><td><b>{h['symbol']}</b></td><td>{h['exit_time']}</td><td class='{h_col}'>{h['pnl_pct']:+.2f}%</td><td class='{h_col}'>{h['pnl_usd']:+.3f}$</td><td>{h['reason']}</td></tr>"
-            if not h_rows: h_rows = "<tr><td colspan='5'>لا توجد صفقات مغلقة بعد</td></tr>"
-
-            html = HTML_TEMPLATE.replace("${ACTION_URL}", act_url) \
-                                .replace("${ACTION_TEXT}", act_text) \
-                                .replace("${ACTION_CLASS}", act_class) \
-                                .replace("${BOT_STATUS}", bot_state["status"]) \
-                                .replace("${GOLD_PRICE}", f"{bot_state['gold_price']:.2f}") \
-                                .replace("${MARKET_STATUS}", market_text) \
-                                .replace("${DAILY_PNL}", f"{bot_state['daily_realized_pnl']:+.3f}") \
-                                .replace("${DAILY_COLOR}", daily_color) \
-                                .replace("${TOTAL_DOWNTIME}", format_duration(bot_state["total_downtime_sec"])) \
-                                .replace("${LAST_HEARTBEAT}", last_hb_str) \
-                                .replace("${OUTAGE_COUNT}", str(len(bot_state["outages"]))) \
-                                .replace("${OUTAGES_ROWS}", o_rows) \
-                                .replace("${LAST_SIGNAL}", sig) \
-                                .replace("${SIGNAL_BADGE}", sig_badge) \
-                                .replace("${LAST_SYNC}", bot_state["last_gold_sync"]) \
-                                .replace("${TICKERS_ROWS}", t_rows) \
-                                .replace("${OPEN_COUNT}", str(len(bot_state["positions"]))) \
-                                .replace("${POSITIONS_ROWS}", p_rows) \
-                                .replace("${HISTORY_ROWS}", h_rows)
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(html.encode('utf-8'))
+            self.wfile.write(json.dumps(bot_state, ensure_ascii=False).encode('utf-8'))
+        else:
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
 
     def log_message(self, format, *args):
         return
 
-def run_server():
-    # قراءة المنفذ المخصص من Railway تلقائياً
-    port = int(os.environ.get("PORT", 8080))
-    server = ReusableHTTPServer(('0.0.0.0', port), DashboardHandler)
-    print(f"🌐 خادم الويب يعمل على المنفذ: {port}")
-    server.serve_forever()
+def run_web_server():
+    with socketserver.TCPServer(("", PORT), DashboardServer) as httpd:
+        httpd.serve_forever()
 
-if __name__ == '__main__':
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    trading_engine()
+if __name__ == "__main__":
+    print("="*70, flush=True)
+    print("🚀 تم تشغيل محاكي التداول التجريبي (Paper Trading) بنجاح!", flush=True)
+    print(f"💰 الرصيد التجريبي: {INITIAL_BALANCE:.2f}$ | عدد العملات: {len(SYMBOLS)}", flush=True)
+    print(f"🌐 افتح الواجهة من متصفح هاتفك عبر الرابط: http://127.0.0.1:{PORT}", flush=True)
+    print("="*70, flush=True)
+
+    # تشغيل خادم الواجهة في خيط منفصل
+    t_server = threading.Thread(target=run_web_server, daemon=True)
+    t_server.start()
+
+    # تشغيل محرك التداول التجريبي
+    trading_loop()
