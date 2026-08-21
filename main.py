@@ -10,10 +10,11 @@ import time
 import hmac
 import hashlib
 import os
+import math
 from datetime import datetime, timezone
 
 # =====================================================================
-# 📁 قراءة ملف config.json الآمن محلياً
+# 📁 قراءة ملف config.json
 # =====================================================================
 def load_config():
     default_config = {
@@ -60,10 +61,24 @@ SYMBOLS = [
     "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT"
 ]
 
+# دقة الكسور الافتراضية لكل عملة (سيتم تحديثها ديناميكياً من MEXC)
+PRECISION_MAP = {
+    "NEARUSDT": 2,
+    "AVAXUSDT": 2,
+    "SOLUSDT": 2,
+    "DOGEUSDT": 0,
+    "BTCUSDT": 4,
+    "ETHUSDT": 4,
+    "BNBUSDT": 3,
+    "XRPUSDT": 1,
+    "ADAUSDT": 1,
+    "LINKUSDT": 2
+}
+
 ssl_ctx = ssl._create_unverified_context()
 
 # =====================================================================
-# 📊 حالة النظام ولوحة التحكم
+# 📊 حالة النظام
 # =====================================================================
 bot_state = {
     "status": "RUNNING",
@@ -79,7 +94,6 @@ bot_state = {
     "active_positions": {sym: [] for sym in SYMBOLS},
     "market_prices": {sym: {"bid": 0.0, "ask": 0.0} for sym in SYMBOLS},
     "api_connected": False,
-    "api_key_set": bool(CONFIG["api_key"] and CONFIG["api_secret"]),
     "recent_logs": []
 }
 
@@ -90,14 +104,48 @@ def add_log(msg, log_type="info"):
         bot_state["recent_logs"].pop()
 
 # =====================================================================
-# 🔐 وظائف MEXC API المتقدمة والتشخيص
+# 🛠️ معالجة دقة الكسور العشرية وقواعد التداول
+# =====================================================================
+def fetch_exchange_precisions():
+    """جلب دقة الكسور العشرية الحقيقية لكل عملة من المنصة"""
+    try:
+        url = f"{BASE_URL}/api/v3/exchangeInfo"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as res:
+            data = json.loads(res.read().decode('utf-8'))
+            for s in data.get("symbols", []):
+                sym = s.get("symbol")
+                if sym in SYMBOLS:
+                    prec = s.get("baseAssetPrecision", 2)
+                    # فحص فلتر LOT_SIZE إن وجد
+                    for f in s.get("filters", []):
+                        if f.get("filterType") == "LOT_SIZE":
+                            step = float(f.get("stepSize", "0.01"))
+                            if step > 0:
+                                prec = max(0, int(round(-math.log10(step))))
+                    PRECISION_MAP[sym] = prec
+            add_log("تم جلب دقة الكسور العشرية المعتمدة لجميع العملات من MEXC", "info")
+    except Exception as e:
+        add_log(f"تعذر جلب exchangeInfo، استخدام القيم الاحتياطية: {e}", "warning")
+
+def format_quantity(symbol, qty):
+    """تقريب الكمية للأسفل حسب الدقة المسموحة للعملة لتجنب 400 Bad Request"""
+    prec = PRECISION_MAP.get(symbol, 2)
+    factor = 10 ** prec
+    truncated = math.floor(qty * factor) / factor
+    if prec == 0:
+        return f"{int(truncated)}"
+    return f"{truncated:.{prec}f}"
+
+# =====================================================================
+# 🔐 وظائف MEXC API
 # =====================================================================
 def sign_query(query_string, secret):
     return hmac.new(secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
 
 def mexc_private_request(endpoint, method="GET", params=None):
     if not CONFIG["api_key"] or not CONFIG["api_secret"]:
-        return False, "مفاتيح API_KEY أو API_SECRET غير محددة في config.json"
+        return False, "مفاتيح API غير محددة"
     if params is None:
         params = {}
     
@@ -123,9 +171,7 @@ def mexc_private_request(endpoint, method="GET", params=None):
         return False, f"فشل الاتصال: {str(e)}"
 
 def check_mexc_health():
-    """فحص شامل للاتصال والمفاتيح والتوقيت"""
     report = {}
-    # 1. فحص Ping
     t0 = time.time()
     try:
         req = urllib.request.Request(f"{BASE_URL}/api/v3/ping", headers={'User-Agent': 'Mozilla/5.0'})
@@ -137,17 +183,6 @@ def check_mexc_health():
         report["ping_error"] = str(e)
         return report
 
-    # 2. فحص مطابقة التوقيت
-    try:
-        req = urllib.request.Request(f"{BASE_URL}/api/v3/time", headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, context=ssl_ctx, timeout=5) as res:
-            srv_time = json.loads(res.read().decode('utf-8'))['serverTime']
-            local_time = int(time.time() * 1000)
-            report["time_drift_ms"] = local_time - srv_time
-    except Exception:
-        report["time_drift_ms"] = "غير معروف"
-
-    # 3. فحص الحساب والرصيد
     if CONFIG["api_key"] and CONFIG["api_secret"]:
         ok, res = mexc_private_request("/api/v3/account", method="GET")
         if ok and "balances" in res:
@@ -163,8 +198,9 @@ def check_mexc_health():
             bot_state["api_connected"] = False
     else:
         report["auth_success"] = False
-        report["auth_error"] = "المفاتيح فارغة"
+        report["auth_error"] = "المفاتيح غير موجودة"
 
+    report["precision_rules"] = PRECISION_MAP
     return report
 
 def fetch_real_balance():
@@ -187,31 +223,38 @@ def place_order(symbol, side, qty=None, quote_qty=None):
         "side": side.upper(),
         "type": "MARKET"
     }
-    # الشراء الفوري في MEXC يفضل تحديده بالقيمة quoteOrderQty (USDT)
+    
     if side.upper() == "BUY" and quote_qty:
         params["quoteOrderQty"] = f"{quote_qty:.2f}"
     elif qty:
-        params["quantity"] = f"{qty:.4f}"
+        params["quantity"] = format_quantity(symbol, qty)
     else:
-        return False, "يجب تحديد الكمية أو القيمة بالدولار"
+        return False, "يجب تحديد الكمية أو القيمة"
 
     return mexc_private_request("/api/v3/order", method="POST", params=params)
 
 def execute_buy(symbol, manual=False):
     bid, ask = get_orderbook(symbol)
     if not ask or ask == 0:
-        add_log(f"تعذر تنفيذ الشراء لـ {symbol}: لم يتم جلب سعر السوق", "danger")
+        add_log(f"تعذر الشراء لـ {symbol}: لم يتم جلب السعر", "danger")
         return False, "سعر السوق غير متوفر"
     
     avail_balance = bot_state["virtual_balance"] if CONFIG["paper_trading"] else bot_state["real_balance"]
     if avail_balance < CONFIG["trade_size_usdt"]:
-        msg = f"رصيد غير كافي ({avail_balance:.2f}$) لشراء {symbol} بحجم {CONFIG['trade_size_usdt']}$"
+        msg = f"رصيد غير كافي ({avail_balance:.2f}$) لشراء {symbol}"
         add_log(msg, "warning")
         return False, msg
 
     buy_price = ask
-    qty = round(CONFIG["trade_size_usdt"] / buy_price, 4)
+    raw_qty = CONFIG["trade_size_usdt"] / buy_price
+    formatted_qty_str = format_quantity(symbol, raw_qty)
+    qty = float(formatted_qty_str)
     
+    if qty <= 0:
+        msg = f"قيمة الدخول صغيرة جداً لـ {symbol}"
+        add_log(msg, "warning")
+        return False, msg
+
     ok, res = place_order(symbol, "BUY", qty=qty, quote_qty=CONFIG["trade_size_usdt"])
     
     if ok:
@@ -225,10 +268,10 @@ def execute_buy(symbol, manual=False):
         })
         src = "يدوي ⚡" if manual else "تلقائي 🤖"
         mode_str = "تجريبي" if CONFIG["paper_trading"] else "حقيقي"
-        add_log(f"🚀 شراء {src} ({mode_str}) لـ {symbol} عند {buy_price}$ (الكمية: {qty})", "primary")
+        add_log(f"🚀 شراء {src} ({mode_str}) لـ {symbol} عند {buy_price}$ (الكمية: {formatted_qty_str})", "primary")
         return True, res
     else:
-        add_log(f"❌ فشل تنفيذ الشراء لـ {symbol}: {res}", "danger")
+        add_log(f"❌ فشل شراء {symbol}: {res}", "danger")
         return False, res
 
 # =====================================================================
@@ -270,7 +313,9 @@ def calculate_ewo(candles):
 # 🔄 حلقة التداول الرئيسية
 # =====================================================================
 def trading_loop():
+    fetch_exchange_precisions()
     add_log("تم تشغيل محرك التداول", "info")
+    
     while True:
         try:
             if not CONFIG["paper_trading"] and CONFIG["api_key"] and CONFIG["api_secret"]:
@@ -363,7 +408,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MEXC Master Hub & Tester</title>
+<title>MEXC Master Hub</title>
 <style>
 :root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--warning:#f59e0b;--text:#f3f4f6;--sub:#94a3b8}
 *{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif}
@@ -408,8 +453,8 @@ input, select{background:#090d16;border:1px solid var(--border);color:var(--text
 <div class="container">
   <div class="header">
     <div>
-      <h2 style="font-size:17px">🤖 MEXC Trader Master & Diagnostic Hub</h2>
-      <p style="font-size:12px;color:var(--sub)">نظام التداول، إدارة المخاطر، وفحص الـ API المباشر</p>
+      <h2 style="font-size:17px">🤖 MEXC Trader Master Hub</h2>
+      <p style="font-size:12px;color:var(--sub)">نظام التداول الآلي، ضبط دقة الكسور، وفحص الاتصال</p>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
       <span id="bot-mode-pill" class="pill pill-running">جاري التشغيل</span>
@@ -421,34 +466,13 @@ input, select{background:#090d16;border:1px solid var(--border);color:var(--text
     </div>
   </div>
 
-  <!-- تفاصيل الفحص والاختبار المتقدم -->
   <details>
-    <summary style="color:#a5b4fc"><span>🧪 نافذة فحص الاتصال واختبار الأوردرات (API Testing Suite)</span><span>انقر للفتح ▾</span></summary>
+    <summary style="color:#a5b4fc"><span>🧪 نافذة فحص الاتصال وقواعد الكسور (Health & Precision Check)</span><span>انقر للفتح ▾</span></summary>
     <div class="details-content">
-      <p style="font-size:12px;color:var(--sub);margin-bottom:10px">استخدم هذه الأدوات للتحقق الفوري من صلاحية المفاتيح، الاتصال بخوادم MEXC، وتنفيذ أوردرات تجريبية مع إظهار تقرير الخطأ بدقة.</p>
-      
       <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-        <button class="btn btn-test" onclick="runHealthCheck()">🔍 فحص الاتصال والمفاتيح (Health Check)</button>
+        <button class="btn btn-test" onclick="runHealthCheck()">🔍 فحص الاتصال والدقة (Health Check)</button>
       </div>
-
-      <div class="form-row" style="align-items:center">
-        <label style="font-size:12px">تنفيذ أمر تجريبي يدوي مخصص:</label>
-        <select id="test-sym">
-          <option value="DOGEUSDT">DOGEUSDT</option>
-          <option value="SOLUSDT">SOLUSDT</option>
-          <option value="ADAUSDT">ADAUSDT</option>
-          <option value="XRPUSDT">XRPUSDT</option>
-          <option value="NEARUSDT">NEARUSDT</option>
-        </select>
-        <select id="test-side">
-          <option value="BUY">شراء (BUY)</option>
-          <option value="SELL">بيع (SELL)</option>
-        </select>
-        <input type="number" id="test-amount" placeholder="القيمة بالدولار (مثال 6)" style="width:170px" value="6">
-        <button class="btn btn-buy" onclick="sendCustomTestOrder()">⚡ إرسال الأوردر التجريبي</button>
-      </div>
-
-      <div class="test-panel" id="test-output">تقرير الاختبار سيظهر هنا...</div>
+      <div class="test-panel" id="test-output">اضغط على زر الفحص أعلاه لعرض حالة الحساب وقواعد دقة كل عملة...</div>
     </div>
   </details>
 
@@ -471,7 +495,7 @@ input, select{background:#090d16;border:1px solid var(--border);color:var(--text
   </div>
 
   <div class="card" style="margin-bottom:14px;padding:0;overflow:hidden">
-    <div style="padding:12px 16px;background:#151e30;font-weight:bold;font-size:14px">📊 مراقبة العملات العشر والشراء الفوري</div>
+    <div style="padding:12px 16px;background:#151e30;font-weight:bold;font-size:14px">📊 مراقبة العملات والشراء الفوري</div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -513,26 +537,6 @@ async function runHealthCheck(){
     document.getElementById('test-output').innerText = JSON.stringify(data, null, 2);
   }catch(e){
     document.getElementById('test-output').innerText = 'تعذر إجراء الفحص: ' + e;
-  }
-}
-
-async function sendCustomTestOrder(){
-  const sym = document.getElementById('test-sym').value;
-  const side = document.getElementById('test-side').value;
-  const amt = parseFloat(document.getElementById('test-amount').value) || 6;
-
-  document.getElementById('test-output').innerText = `جاري إرسال أمر ${side} لـ ${sym}...`;
-  try{
-    const res = await fetch('/api/test_order', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({symbol: sym, side: side, amount: amt})
-    });
-    const data = await res.json();
-    document.getElementById('test-output').innerText = JSON.stringify(data, null, 2);
-    refreshDashboard();
-  }catch(e){
-    document.getElementById('test-output').innerText = 'فشل تنفيذ الطلب: ' + e;
   }
 }
 
@@ -698,24 +702,6 @@ class DashboardServer(http.server.BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
 
-        elif self.path == '/api/test_order':
-            sym = data.get("symbol", "DOGEUSDT")
-            side = data.get("side", "BUY")
-            amt = float(data.get("amount", 6.0))
-            
-            if side == "BUY":
-                ok, res = place_order(sym, "BUY", quote_qty=amt)
-            else:
-                # بيع تجريبي لكمية صغيرة
-                bid, _ = get_orderbook(sym)
-                qty = round(amt / bid, 2) if bid else 1.0
-                ok, res = place_order(sym, "SELL", qty=qty)
-                
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": ok, "response": res}, ensure_ascii=False).encode('utf-8'))
-
     def log_message(self, format, *args):
         return
 
@@ -725,7 +711,7 @@ def run_web_server():
 
 if __name__ == "__main__":
     print("="*65)
-    print(f"🚀 تم تشغيل البوت ولوحة الاختبار على: http://127.0.0.1:{PORT}")
+    print(f"🚀 تم تشغيل البوت ولوحة التحكم على: http://127.0.0.1:{PORT}")
     print("="*65)
     
     t_server = threading.Thread(target=run_web_server, daemon=True)
