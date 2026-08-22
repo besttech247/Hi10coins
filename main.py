@@ -34,6 +34,9 @@ PRECISION_MAP = {
     "ETHUSDT": 4, "BNBUSDT": 3, "XRPUSDT": 1, "ADAUSDT": 1, "LINKUSDT": 2
 }
 
+# =====================================================================
+# 📊 الحالة العامة المشتركة مع دعم كامل للأهداف اليومية والأرباح
+# =====================================================================
 shared_state = {
     "api_connected": False,
     "real_balance_usdt": 0.0,
@@ -41,29 +44,39 @@ shared_state = {
     "market_prices": {sym: {"bid": 0.0, "ask": 0.0} for sym in SYMBOLS},
     "recent_logs": [],
     "start_timestamp": START_TIME,
+    "current_day": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
     "bots": {
         "BOT_1": {
             "name": "🤖 Bot 1 (EWO 5m)",
             "status": "RUNNING",
             "daily_pnl": 0.0,
+            "daily_target": 5.0,
+            "daily_coin_target": 1.5,
             "trades_count": 0,
             "winning_count": 0,
+            "daily_pnl_coins": {sym: 0.0 for sym in SYMBOLS},
             "active_positions": {sym: [] for sym in SYMBOLS}
         },
         "BOT_2": {
             "name": "⚡ Bot 2 (EWO Custom TF)",
             "status": "PAUSED",
             "daily_pnl": 0.0,
+            "daily_target": 5.0,
+            "daily_coin_target": 1.5,
             "trades_count": 0,
             "winning_count": 0,
+            "daily_pnl_coins": {sym: 0.0 for sym in SYMBOLS},
             "active_positions": {sym: [] for sym in SYMBOLS}
         },
         "BOT_3": {
             "name": "🎯 Bot 3 (Manual Trigger + Auto Bracket)",
             "status": "RUNNING",
             "daily_pnl": 0.0,
+            "daily_target": 5.0,
+            "daily_coin_target": 1.5,
             "trades_count": 0,
             "winning_count": 0,
+            "daily_pnl_coins": {sym: 0.0 for sym in SYMBOLS},
             "active_positions": {sym: [] for sym in SYMBOLS}
         }
     }
@@ -127,7 +140,6 @@ def fetch_klines(symbol, interval="5m", limit=45):
         return []
 
 def place_order(symbol, side, qty=None, quote_qty=None):
-    """تنفيذ أمر بيع أو شراء حقيقي 100% بسعر السوق"""
     params = {"symbol": symbol, "side": side.upper(), "type": "MARKET"}
     if side.upper() == "BUY" and quote_qty:
         params["quoteOrderQty"] = f"{quote_qty:.2f}"
@@ -138,7 +150,7 @@ def place_order(symbol, side, qty=None, quote_qty=None):
     return mexc_private_request("/api/v3/order", method="POST", params=params)
 
 # =====================================================================
-# 🤖 محرك التداول الحقيقي
+# 🤖 محرك التداول الحقيقي + الأهداف اليومية وقفل الأرباح
 # =====================================================================
 def calculate_ewo(candles):
     if len(candles) < 38: return None, None, None
@@ -152,10 +164,19 @@ def calculate_ewo(candles):
     return vals[0], vals[1], vals[2]
 
 def trading_engine_loop():
-    add_log("تم تشغيل محرك التداول الحقيقي (Live Trading 100%)", "info")
+    add_log("تم تشغيل محرك التداول الحقيقي ومراقبة الأهداف اليومية", "info")
     while True:
         try:
-            # تحديث رصيد المحفظة الفعلي من MEXC
+            # 1. التصفير التلقائي للأهداف اليومية عند منتصف الليل 00:00 UTC
+            now_day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            if now_day != shared_state["current_day"]:
+                shared_state["current_day"] = now_day
+                for bKey in ["BOT_1", "BOT_2", "BOT_3"]:
+                    shared_state["bots"][bKey]["daily_pnl"] = 0.0
+                    shared_state["bots"][bKey]["daily_pnl_coins"] = {sym: 0.0 for sym in SYMBOLS}
+                add_log(f"🌅 بداية يوم تداول جديد ({now_day} UTC) - تصفير الأهداف اليومية", "info")
+
+            # 2. تحديث أرصدة المحفظة الحقيقية
             ok, acc = mexc_private_request("/api/v3/account")
             if ok and "balances" in acc:
                 shared_state["api_connected"] = True
@@ -181,6 +202,10 @@ def trading_engine_loop():
             shared_state["bots"]["BOT_1"]["status"] = cfg_b1.get("status", "RUNNING")
             shared_state["bots"]["BOT_2"]["status"] = cfg_b2.get("status", "PAUSED")
             shared_state["bots"]["BOT_3"]["status"] = cfg_b3.get("status", "RUNNING")
+
+            # فحص قفل الهدف الإجمالي للبوتات
+            b1_target_locked = shared_state["bots"]["BOT_1"]["daily_pnl"] >= shared_state["bots"]["BOT_1"]["daily_target"]
+            b2_target_locked = shared_state["bots"]["BOT_2"]["daily_pnl"] >= shared_state["bots"]["BOT_2"]["daily_target"]
 
             for sym in SYMBOLS:
                 bid, ask = get_orderbook(sym)
@@ -209,15 +234,20 @@ def trading_engine_loop():
                                     if ok:
                                         pnl = (bid - pos['entry_price']) * pos['qty']
                                         shared_state["bots"]["BOT_1"]["daily_pnl"] += pnl
+                                        shared_state["bots"]["BOT_1"]["daily_pnl_coins"][sym] += pnl
                                         shared_state["bots"]["BOT_1"]["trades_count"] += 1
                                         if pnl > 0: shared_state["bots"]["BOT_1"]["winning_count"] += 1
-                                        add_log(f"[Bot 1] بيع حقيقي {sym} PnL: {pnl:+.3f}$", "success" if pnl > 0 else "danger")
+                                        add_log(f"[Bot 1] بيع {sym} PnL: {pnl:+.3f}$", "success" if pnl > 0 else "danger")
                                     else: still_b1.append(pos)
                                 else: still_b1.append(pos)
                             shared_state["bots"]["BOT_1"]["active_positions"][sym] = still_b1
 
-                            # الدخول في صفقات جديدة فقط عند حالة RUNNING
-                            if cfg_b1.get("status") == "RUNNING" and len(still_b1) < 4 and (e1 < 0 and e1 > e2 and e2 <= e3):
+                            # شروط الدخول مع قفل الأهداف
+                            b1_coin_locked = shared_state["bots"]["BOT_1"]["daily_pnl_coins"].get(sym, 0.0) >= shared_state["bots"]["BOT_1"]["daily_coin_target"]
+                            can_open = len(still_b1) < 5
+                            sig_rebound = (e1 < 0 and e1 > e2 and e2 <= e3)
+
+                            if cfg_b1.get("status") == "RUNNING" and can_open and sig_rebound and not b1_target_locked and not b1_coin_locked:
                                 if shared_state["real_balance_usdt"] >= size:
                                     q = float(format_quantity(sym, size / ask))
                                     if q > 0:
@@ -226,7 +256,7 @@ def trading_engine_loop():
                                             shared_state["bots"]["BOT_1"]["active_positions"][sym].append({
                                                 'id': f"b1_{int(time.time()*1000)}", 'entry_price': ask, 'qty': q, 'time': datetime.now(timezone.utc).strftime("%H:%M")
                                             })
-                                            add_log(f"[Bot 1] 🚀 شراء حقيقي {sym} عند {ask}$", "primary")
+                                            add_log(f"[Bot 1] 🚀 شراء {sym} عند {ask}$ ({len(still_b1)+1}/5)", "primary")
 
                 # -------------------------------------------------------------
                 # ⚡ Bot 2 (EWO Custom TF)
@@ -248,14 +278,19 @@ def trading_engine_loop():
                                     if ok:
                                         pnl = (bid - pos['entry_price']) * pos['qty']
                                         shared_state["bots"]["BOT_2"]["daily_pnl"] += pnl
+                                        shared_state["bots"]["BOT_2"]["daily_pnl_coins"][sym] += pnl
                                         shared_state["bots"]["BOT_2"]["trades_count"] += 1
                                         if pnl > 0: shared_state["bots"]["BOT_2"]["winning_count"] += 1
-                                        add_log(f"[Bot 2 ({tf})] بيع حقيقي {sym} PnL: {pnl:+.3f}$", "success" if pnl > 0 else "danger")
+                                        add_log(f"[Bot 2 ({tf})] بيع {sym} PnL: {pnl:+.3f}$", "success" if pnl > 0 else "danger")
                                     else: still_b2.append(pos)
                                 else: still_b2.append(pos)
                             shared_state["bots"]["BOT_2"]["active_positions"][sym] = still_b2
 
-                            if cfg_b2.get("status") == "RUNNING" and len(still_b2) < 4 and (e1 < 0 and e1 > e2 and e2 <= e3):
+                            b2_coin_locked = shared_state["bots"]["BOT_2"]["daily_pnl_coins"].get(sym, 0.0) >= shared_state["bots"]["BOT_2"]["daily_coin_target"]
+                            can_open2 = len(still_b2) < 5
+                            sig_rebound2 = (e1 < 0 and e1 > e2 and e2 <= e3)
+
+                            if cfg_b2.get("status") == "RUNNING" and can_open2 and sig_rebound2 and not b2_target_locked and not b2_coin_locked:
                                 if shared_state["real_balance_usdt"] >= size2:
                                     q = float(format_quantity(sym, size2 / ask))
                                     if q > 0:
@@ -264,10 +299,10 @@ def trading_engine_loop():
                                             shared_state["bots"]["BOT_2"]["active_positions"][sym].append({
                                                 'id': f"b2_{int(time.time()*1000)}", 'entry_price': ask, 'qty': q, 'time': datetime.now(timezone.utc).strftime("%H:%M")
                                             })
-                                            add_log(f"[Bot 2 ({tf})] ⚡ شراء حقيقي {sym} عند {ask}$", "primary")
+                                            add_log(f"[Bot 2 ({tf})] ⚡ شراء {sym} عند {ask}$ ({len(still_b2)+1}/5)", "primary")
 
                 # -------------------------------------------------------------
-                # 🎯 Bot 3 (Manual Trigger + TP/SL + Trailing Stop)
+                # 🎯 Bot 3 (Manual Trigger + Auto Bracket & Trailing)
                 # -------------------------------------------------------------
                 if cfg_b3.get("status") != "STOPPED":
                     tp_pct = float(cfg_b3.get("tp_pct", 0.015))
@@ -298,6 +333,7 @@ def trading_engine_loop():
                             if ok:
                                 pnl = (bid - entry) * pos['qty']
                                 shared_state["bots"]["BOT_3"]["daily_pnl"] += pnl
+                                shared_state["bots"]["BOT_3"]["daily_pnl_coins"][sym] += pnl
                                 shared_state["bots"]["BOT_3"]["trades_count"] += 1
                                 if pnl > 0: shared_state["bots"]["BOT_3"]["winning_count"] += 1
                                 reason = "🎯 جني أرباح TP" if hit_tp else ("🔄 تريلينج ستوب" if use_ts and effective_sl > sl_price else "🛑 وقف خسارة SL")
@@ -315,7 +351,7 @@ def trading_engine_loop():
         time.sleep(7)
 
 # =====================================================================
-# 🌐 واجهات HTML الموحدة
+# 🌐 واجهات HTML الموحدة مع استعادة شريط التقدم والبطاقات الأصلية
 # =====================================================================
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -331,8 +367,8 @@ button{width:100%;padding:10px;background:#3b82f6;color:#fff;border:none;border-
 <div class="box">
   <h3 style="text-align:center;margin-bottom:12px">🔐 تسجيل الدخول</h3>
   <form id="f">
-    <input type="text" id="u" placeholder="admin" required>
-    <input type="password" id="p" placeholder="admin123" required>
+    <input type="text" id="u" placeholder="اسم المستخدم" required>
+    <input type="password" id="p" placeholder="كلمة المرور" required>
     <button type="submit">دخول</button>
   </form>
 </div>
@@ -352,24 +388,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Multi-Bot Live Hub</title>
 <style>
 :root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
-*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui}
-body{background:var(--bg);color:var(--text);padding:12px}
-.header-box{display:flex;justify-content:space-between;align-items:center;padding:12px;background:var(--card);border-radius:10px;border:1px solid var(--border);margin-bottom:10px;flex-wrap:wrap;gap:10px}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--text);padding:12px;line-height:1.5}
+.header-box{display:flex;justify-content:space-between;align-items:center;padding:12px;background:var(--card);border-radius:12px;border:1px solid var(--border);margin-bottom:12px;flex-wrap:wrap;gap:10px}
 .wallet-bar{display:flex;gap:12px;align-items:center;background:#151e30;padding:8px 12px;border-radius:8px;border:1px solid var(--border)}
 .tabs{display:flex;gap:6px;margin:12px 0;overflow-x:auto}
 .tab{padding:8px 14px;background:#151e30;border:1px solid var(--border);border-radius:8px;color:var(--sub);cursor:pointer;font-weight:bold;white-space:nowrap}
 .tab.active{background:var(--primary);color:#fff}
 .tab-pane{display:none}
 .tab-pane.active{display:block}
-.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:10px}
-.val{font-size:18px;font-weight:bold}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:10px}
+.card-title{font-size:12px;color:var(--sub);margin-bottom:4px}
+.card-val{font-size:22px;font-weight:bold}
+.progress-bar{height:6px;background:#1f293d;border-radius:3px;margin-top:8px;overflow:hidden}
+.progress-fill{height:100%;background:var(--primary);transition:width .4s}
 .btn{padding:5px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:12px}
 table{width:100%;border-collapse:collapse;text-align:right}
-th,td{padding:7px;border-bottom:1px solid var(--border);font-size:12px}
-.logs{max-height:160px;overflow-y:auto;font-family:monospace;font-size:11px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px}
+th{color:var(--sub)}
+.badge{padding:2px 8px;border-radius:6px;font-size:11px;font-weight:bold}
+.badge-active{background:#10b98122;color:var(--success)}
+.badge-idle{background:#64748b22;color:var(--sub)}
+.logs{max-height:180px;overflow-y:auto;font-family:monospace;font-size:11px}
 input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px 10px;border-radius:6px;font-size:12px;width:100%}
-details{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden}
+details{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden}
 summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
 .form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;padding:10px}
 .badge-live{background:#10b98122;color:#10b981;border:1px solid #10b98144;padding:2px 6px;border-radius:4px;font-size:11px}
@@ -379,10 +422,10 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
   <div class="header-box">
     <div>
       <div style="display:flex;align-items:center;gap:8px">
-        <strong>🎛️ MEXC Live Trading Platform</strong>
+        <strong>🎛️ MEXC Multi-Bot Command Hub</strong>
         <span class="badge-live">⚡ تداول حقيقي 100%</span>
       </div>
-      <div style="font-size:11px;color:var(--sub);margin-top:2px">⏳ وقت تشغيل النظام: <span id="uptime" style="color:#60a5fa;font-weight:bold">00:00:00</span></div>
+      <div style="font-size:11px;color:var(--sub);margin-top:2px">⏳ عمر تشغيل البوت: <span id="uptime" style="color:#60a5fa;font-weight:bold">00:00:00</span></div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
       <div class="wallet-bar">
@@ -417,7 +460,7 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
     <button class="tab active" onclick="showTab('t1', this)">🤖 Bot 1 (EWO 5m)</button>
     <button class="tab" onclick="showTab('t2', this)">⚡ Bot 2 (EWO مخصص)</button>
     <button class="tab" onclick="showTab('t3', this)">🎯 Bot 3 (شراء يدوي + آلي)</button>
-    <button class="tab" onclick="showTab('t4', this)">💰 المحفظة الشاملة والتسييل</button>
+    <button class="tab" onclick="showTab('t4', this)">💰 المحفظة والتسييل</button>
   </div>
 
   <!-- Bot 1 (EWO 5m) -->
@@ -430,29 +473,52 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
         <button class="btn" style="background:var(--danger);color:#fff" onclick="setSt('BOT_1','STOPPED')">⏹️ إيقاف تام</button>
       </div>
     </div>
+    
+    <!-- بطاقات الإحصائيات مع شريط التقدم للهدف اليومي والسيولة المحجوزة -->
     <div class="grid">
-      <div class="card"><div style="font-size:11px;color:var(--sub)">أرباح اليوم المحققة</div><div class="val" id="b1-pnl">0.00$</div></div>
-      <div class="card"><div style="font-size:11px;color:var(--sub)">نسبة النجاح</div><div class="val" id="b1-winrate">0%</div></div>
-      <div class="card"><div style="font-size:11px;color:var(--sub)">إجمالي الصفقات</div><div class="val" id="b1-trades">0</div></div>
+      <div class="card">
+        <div class="card-title">أرباح اليوم المحققة</div>
+        <div class="card-val" id="b1-pnl">+0.00$</div>
+        <div class="progress-bar"><div class="progress-fill" id="b1-pnl-bar" style="width:0%"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:4px">
+          <span>الهدف: 5.00$</span><span id="b1-pnl-pct">0%</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">نسبة الفوز الإجمالية</div>
+        <div class="card-val" id="b1-winrate">0.0%</div>
+        <div style="font-size:11px;color:var(--sub);margin-top:4px" id="b1-trade-stats">0 صفقات منفذة</div>
+      </div>
+      <div class="card">
+        <div class="card-title">الصفقات والسيولة المفتوحة</div>
+        <div class="card-val" id="b1-open-count">0 صفقات</div>
+        <div style="font-size:11px;color:var(--sub);margin-top:4px" id="b1-cap-used">0$ محجوزة في السوق</div>
+      </div>
     </div>
 
     <!-- إعدادات Bot 1 -->
     <details>
       <summary style="color:#a78bfa">⚙️ تخصيص حجم الصفقة ونسبة الوقف (Bot 1) ▾</summary>
       <div class="form-row">
-        <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة من رصيد المحفظة ($)</label><input type="number" id="b1-size" value="10"></div>
+        <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="b1-size" value="10"></div>
         <div><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="b1-sl" value="0.49" step="0.01"></div>
         <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('BOT_1', 'b1')">💾 حفظ الإعدادات</button></div>
       </div>
     </details>
 
+    <!-- جدول العملات الـ 10 مع أرباح كل عملة وشارات الصفقات المفتوحة ( count/5 ) وشراء فوري -->
     <div class="card">
-      <strong style="font-size:12px">📊 جدول العملات والشراء المباشر:</strong>
-      <div style="overflow-x:auto"><table id="market-table"><thead><tr><th>العملة</th><th>سعر الشراء (Ask)</th><th>سعر البيع (Bid)</th><th>شراء فوري</th></tr></thead><tbody></tbody></table></div>
+      <strong style="font-size:13px;display:block;margin-bottom:6px">📊 حالة العملات العشر، أرباح اليوم، والشراء السريع:</strong>
+      <div style="overflow-x:auto">
+        <table id="b1-coins-table">
+          <thead><tr><th>العملة</th><th>سعر السوق</th><th>ربح اليوم</th><th>الصفقات المفتوحة</th><th>شراء فوري</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
 
     <div class="card">
-      <strong style="font-size:12px">📂 صفقات Bot 1 المفتوحة:</strong>
+      <strong style="font-size:13px;display:block;margin-bottom:6px">📂 صفقات Bot 1 المفتوحة:</strong>
       <div style="overflow-x:auto"><table id="b1-orders"><thead><tr><th>العملة</th><th>سعر الدخول</th><th>الكمية</th><th>الوقت</th><th>تسييل بأمر</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
@@ -468,9 +534,24 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
       </div>
     </div>
     <div class="grid">
-      <div class="card"><div style="font-size:11px;color:var(--sub)">أرباح اليوم المحققة</div><div class="val" id="b2-pnl">0.00$</div></div>
-      <div class="card"><div style="font-size:11px;color:var(--sub)">نسبة النجاح</div><div class="val" id="b2-winrate">0%</div></div>
-      <div class="card"><div style="font-size:11px;color:var(--sub)">إجمالي الصفقات</div><div class="val" id="b2-trades">0</div></div>
+      <div class="card">
+        <div class="card-title">أرباح اليوم المحققة</div>
+        <div class="card-val" id="b2-pnl">+0.00$</div>
+        <div class="progress-bar"><div class="progress-fill" id="b2-pnl-bar" style="width:0%"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:4px">
+          <span>الهدف: 5.00$</span><span id="b2-pnl-pct">0%</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">نسبة الفوز الإجمالية</div>
+        <div class="card-val" id="b2-winrate">0.0%</div>
+        <div style="font-size:11px;color:var(--sub);margin-top:4px" id="b2-trade-stats">0 صفقات منفذة</div>
+      </div>
+      <div class="card">
+        <div class="card-title">الصفقات والسيولة المفتوحة</div>
+        <div class="card-val" id="b2-open-count">0 صفقات</div>
+        <div style="font-size:11px;color:var(--sub);margin-top:4px" id="b2-cap-used">0$ محجوزة في السوق</div>
+      </div>
     </div>
 
     <!-- إعدادات Bot 2 -->
@@ -478,7 +559,7 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
       <summary style="color:#a78bfa">⚙️ تخصيص الفريم الزمني والصفقة (Bot 2) ▾</summary>
       <div class="form-row">
         <div>
-          <label style="font-size:11px;color:var(--sub)">الفريم الزمني للتحليل</label>
+          <label style="font-size:11px;color:var(--sub)">الفريم الزمني</label>
           <select id="b2-tf">
             <option value="1m">1 دقيقة</option>
             <option value="5m">5 دقائق</option>
@@ -495,7 +576,12 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
     </details>
 
     <div class="card">
-      <strong style="font-size:12px">📂 صفقات Bot 2 المفتوحة:</strong>
+      <strong style="font-size:13px;display:block;margin-bottom:6px">📊 جدول العملات وأرباح اليوم (Bot 2):</strong>
+      <div style="overflow-x:auto"><table id="b2-coins-table"><thead><tr><th>العملة</th><th>سعر السوق</th><th>ربح اليوم</th><th>الصفقات المفتوحة</th><th>شراء فوري</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <div class="card">
+      <strong style="font-size:13px;display:block;margin-bottom:6px">📂 صفقات Bot 2 المفتوحة:</strong>
       <div style="overflow-x:auto"><table id="b2-orders"><thead><tr><th>العملة</th><th>سعر الدخول</th><th>الكمية</th><th>الوقت</th><th>تسييل بأمر</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
@@ -510,16 +596,31 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
       </div>
     </div>
     <div class="grid">
-      <div class="card"><div style="font-size:11px;color:var(--sub)">أرباح اليوم المحققة</div><div class="val" id="b3-pnl">0.00$</div></div>
-      <div class="card"><div style="font-size:11px;color:var(--sub)">نسبة النجاح</div><div class="val" id="b3-winrate">0%</div></div>
-      <div class="card"><div style="font-size:11px;color:var(--sub)">إجمالي الصفقات</div><div class="val" id="b3-trades">0</div></div>
+      <div class="card">
+        <div class="card-title">أرباح اليوم المحققة</div>
+        <div class="card-val" id="b3-pnl">+0.00$</div>
+        <div class="progress-bar"><div class="progress-fill" id="b3-pnl-bar" style="width:0%"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--sub);margin-top:4px">
+          <span>الهدف: 5.00$</span><span id="b3-pnl-pct">0%</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">نسبة الفوز الإجمالية</div>
+        <div class="card-val" id="b3-winrate">0.0%</div>
+        <div style="font-size:11px;color:var(--sub);margin-top:4px" id="b3-trade-stats">0 صفقات منفذة</div>
+      </div>
+      <div class="card">
+        <div class="card-title">الصفقات والسيولة المفتوحة</div>
+        <div class="card-val" id="b3-open-count">0 صفقات</div>
+        <div style="font-size:11px;color:var(--sub);margin-top:4px" id="b3-cap-used">0$ محجوزة في السوق</div>
+      </div>
     </div>
 
     <!-- إعدادات Bot 3 -->
     <details open>
       <summary style="color:#38bdf8">🎯 إعدادات جني الأرباح ووقف الخسارة التلقائي والـ Trailing Stop ▾</summary>
       <div class="form-row">
-        <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة الحقيقية ($)</label><input type="number" id="b3-size" value="10"></div>
+        <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="b3-size" value="10"></div>
         <div><label style="font-size:11px;color:var(--sub)">جني الأرباح (TP %)</label><input type="number" id="b3-tp" value="1.5" step="0.1"></div>
         <div><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="b3-sl" value="0.5" step="0.1"></div>
         <div>
@@ -531,12 +632,12 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
     </details>
 
     <div class="card">
-      <strong style="font-size:12px">⚡ إطلاق صفقة شراء حقيقية (يستلمها البوت فوراً بأوامر البيع الآلية):</strong>
-      <div style="overflow-x:auto;margin-top:6px"><table id="b3-market-table"><thead><tr><th>العملة</th><th>سعر السوق</th><th>إطلاق الصفقة بنقرة واحدة</th></tr></thead><tbody></tbody></table></div>
+      <strong style="font-size:13px;display:block;margin-bottom:6px">⚡ إطلاق صفقة شراء حقيقية (يستلمها البوت فوراً بأوامر البيع الآلية):</strong>
+      <div style="overflow-x:auto"><table id="b3-market-table"><thead><tr><th>العملة</th><th>سعر السوق</th><th>إطلاق الصفقة بنقرة واحدة</th></tr></thead><tbody></tbody></table></div>
     </div>
 
     <div class="card">
-      <strong style="font-size:12px">📂 صفقات Bot 3 المفتوحة (تدار آلياً):</strong>
+      <strong style="font-size:13px;display:block;margin-bottom:6px">📂 صفقات Bot 3 المفتوحة (تدار آلياً):</strong>
       <div style="overflow-x:auto"><table id="b3-orders"><thead><tr><th>العملة</th><th>سعر الدخول</th><th>أعلى سعر</th><th>الكمية</th><th>الوقت</th><th>تسييل يدوي</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
@@ -544,7 +645,7 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
   <!-- Wallet -->
   <div id="t4" class="tab-pane">
     <div class="card">
-      <strong style="font-size:12px;display:block;margin-bottom:8px">💼 أرصدة المحفظة الحية في حساب MEXC:</strong>
+      <strong style="font-size:13px;display:block;margin-bottom:8px">💼 أرصدة المحفظة الحية في حساب MEXC:</strong>
       <div style="overflow-x:auto"><table id="w-table"><thead><tr><th>العملة</th><th>المتاح (Free)</th><th>المحجوز (Locked)</th><th>الإجمالي</th><th>إجراء تسييل</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
@@ -552,7 +653,7 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
   <!-- Logs -->
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-      <strong style="font-size:12px">📜 سجل العمليات المباشر لكافة البوتات:</strong>
+      <strong style="font-size:13px">📜 سجل العمليات الفورية (Live Events):</strong>
       <button class="btn" style="background:#334155;color:#fff;font-size:11px" onclick="copyLogs()">📋 نسخ السجلات</button>
     </div>
     <div class="logs" id="logs"></div>
@@ -598,9 +699,9 @@ async function saveBotCfg(botName, prefix){
     payload.timeframe = document.getElementById('b2-tf').value;
   }
   if(prefix==='b3'){
-    payload.tp_pct = (parseFloat(document.getElementById('b3-tp').value)||1.5) / 100.0;
-    payload.sl_pct = (parseFloat(document.getElementById('b3-sl').value)||0.5) / 100.0;
-    payload.trailing_stop = parseInt(document.getElementById('b3-ts').value);
+    payload.tp_pct = (parseFloat(document.getElementById(prefix+'-tp').value)||1.5) / 100.0;
+    payload.sl_pct = (parseFloat(document.getElementById(prefix+'-sl').value)||0.5) / 100.0;
+    payload.trailing_stop = parseInt(document.getElementById(prefix+'-ts').value);
   }
   await fetch('/api/save_bot_config', {method:'POST', body:JSON.stringify(payload)});
   alert(`✅ تم حفظ إعدادات ${botName} بنجاح!`);
@@ -647,11 +748,10 @@ async function update(){
     
     if(d.start_timestamp) startTs = d.start_timestamp * 1000;
     
-    // عرض رصيد USDT الفعلي وحالة الاتصال
     document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + ' $';
     document.getElementById('api-stat').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 MEXC متصل</span>' : '<span style="color:var(--danger)">🔴 API غير متصل</span>';
 
-    // تحديث إحصائيات البوتات
+    // تحديث بيانات وإحصائيات البوتات الثلاثة
     ['BOT_1', 'BOT_2', 'BOT_3'].forEach(bKey => {
       const pfx = bKey === 'BOT_1' ? 'b1' : (bKey === 'BOT_2' ? 'b2' : 'b3');
       const bObj = d.bots[bKey];
@@ -660,13 +760,51 @@ async function update(){
       stEl.innerText = bObj.status || 'RUNNING';
       stEl.style.color = bObj.status === 'RUNNING' ? '#10b981' : (bObj.status === 'PAUSED' ? '#f59e0b' : '#ef4444');
 
-      document.getElementById(pfx+'-pnl').innerText = (bObj.daily_pnl>=0?'+':'')+bObj.daily_pnl.toFixed(3)+'$';
-      document.getElementById(pfx+'-trades').innerText = bObj.trades_count;
-      document.getElementById(pfx+'-winrate').innerText = bObj.trades_count > 0 ? ((bObj.winning_count / bObj.trades_count) * 100).toFixed(1) + '%' : '0%';
+      // 1. الأرباح وشريط التقدم
+      const pnl = bObj.daily_pnl || 0.0;
+      const pnlEl = document.getElementById(pfx+'-pnl');
+      pnlEl.innerText = (pnl >= 0 ? '+' : '') + pnl.toFixed(3) + '$';
+      pnlEl.style.color = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+      
+      const pct = Math.min(100, Math.max(0, (pnl / (bObj.daily_target || 5.0)) * 100));
+      document.getElementById(pfx+'-pnl-bar').style.width = pct + '%';
+      document.getElementById(pfx+'-pnl-pct').innerText = pct.toFixed(0) + '%';
 
+      // 2. نسبة الفوز
+      const totalT = bObj.trades_count || 0;
+      const winT = bObj.winning_count || 0;
+      const wr = totalT > 0 ? ((winT / totalT) * 100).toFixed(1) : '0.0';
+      document.getElementById(pfx+'-winrate').innerText = wr + '%';
+      document.getElementById(pfx+'-trade-stats').innerText = `${totalT} صفقة (${winT} رابحة)`;
+
+      // 3. جدول العملات والسيولة المحجوزة
+      let totalOpen = 0;
+      let coinsTableHtml = '';
+      for(const sym of Object.keys(bObj.active_positions)){
+        const count = (bObj.active_positions[sym] || []).length;
+        totalOpen += count;
+        const coinPnl = (bObj.daily_pnl_coins && bObj.daily_pnl_coins[sym]) ? bObj.daily_pnl_coins[sym] : 0.0;
+        const price = d.market_prices[sym] ? d.market_prices[sym].bid : 0.0;
+
+        coinsTableHtml += `<tr>
+          <td><strong>${sym}</strong></td>
+          <td>${price ? price.toFixed(4)+'$' : '-'}</td>
+          <td style="color:${coinPnl>=0?'var(--success)':'var(--danger)'};font-weight:bold">${(coinPnl>=0?'+':'')+coinPnl.toFixed(3)}$</td>
+          <td><span class="badge ${count>0?'badge-active':'badge-idle'}">${count}/5 صفقات</span></td>
+          <td><button class="btn" style="background:var(--primary);color:#fff;padding:2px 8px" onclick="triggerBuy('${bKey}','${sym}')">⚡ شراء</button></td>
+        </tr>`;
+      }
+
+      if(document.getElementById(pfx+'-coins-table')){
+        document.getElementById(pfx+'-coins-table').querySelector('tbody').innerHTML = coinsTableHtml;
+      }
+      document.getElementById(pfx+'-open-count').innerText = totalOpen + ' صفقات';
+      document.getElementById(pfx+'-cap-used').innerText = (totalOpen * 10) + '$ محجوزة في السوق';
+
+      // 4. جدول الصفقات المفتوحة
       let posHtml = '';
       for(let s in bObj.active_positions){
-        bObj.active_positions[s].forEach(p=>{
+        (bObj.active_positions[s] || []).forEach(p=>{
           const highestCol = pfx === 'b3' ? `<td>${p.highest_price||p.entry_price}$</td>` : '';
           posHtml += `<tr><td><strong>${s}</strong></td><td>${p.entry_price}$</td>${highestCol}<td>${p.qty}</td><td>${p.time}</td><td><button class="btn" style="background:var(--danger);color:#fff;padding:2px 6px" onclick="closeSinglePos('${bKey}','${s}', '${p.id}')">🔥 تسييل</button></td></tr>`;
         });
@@ -675,14 +813,12 @@ async function update(){
       document.getElementById(pfx+'-orders').querySelector('tbody').innerHTML = posHtml || `<tr><td colspan="${colSpan}" style="text-align:center;color:var(--sub)">لا توجد صفقات مفتوحة</td></tr>`;
     });
 
-    // Market Table for Bot 1 & Bot 3
-    let mHtml = '', b3MHtml = '';
+    // Bot 3 Market Trigger Table
+    let b3MHtml = '';
     for(let sym of Object.keys(d.market_prices)){
       const p = d.market_prices[sym];
-      mHtml += `<tr><td><strong>${sym}</strong></td><td>${p.ask>0?p.ask+'$':'-'}</td><td>${p.bid>0?p.bid+'$':'-'}</td><td><button class="btn" style="background:var(--primary);color:#fff;padding:2px 8px" onclick="triggerBuy('BOT_1','${sym}')">⚡ شراء</button></td></tr>`;
       b3MHtml += `<tr><td><strong>${sym}</strong></td><td>${p.ask>0?p.ask+'$':'-'}</td><td><button class="btn" style="background:#0ea5e9;color:#fff;padding:2px 8px" onclick="triggerBuy('BOT_3','${sym}')">🎯 شراء وتسليم الآلي</button></td></tr>`;
     }
-    document.getElementById('market-table').querySelector('tbody').innerHTML = mHtml;
     document.getElementById('b3-market-table').querySelector('tbody').innerHTML = b3MHtml;
 
     // Wallet
@@ -697,13 +833,13 @@ async function update(){
     let lHtml = '';
     logsText = '';
     (d.recent_logs||[]).forEach(l=>{
-      lHtml += `<div>[${l.time}] ${l.msg}</div>`;
+      lHtml += `<div style="padding:3px 0;border-bottom:1px solid #1f293d44"><span style="color:var(--sub)">[${l.time}]</span> <span>${l.msg}</span></div>`;
       logsText += `[${l.time}] ${l.msg}\\n`;
     });
     document.getElementById('logs').innerHTML = lHtml;
   }catch(e){}
 }
-setInterval(update, 2500);
+setInterval(update, 2000);
 update();
 </script>
 </body>
@@ -817,6 +953,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     cur_price = bid if bid else p['entry_price']
                     pnl = (cur_price - p['entry_price']) * p['qty']
                     shared_state["bots"][b_name]["daily_pnl"] += pnl
+                    shared_state["bots"][b_name]["daily_pnl_coins"][sym] += pnl
                     shared_state["bots"][b_name]["trades_count"] += 1
                     if pnl > 0: shared_state["bots"][b_name]["winning_count"] += 1
                     add_log(f"🔥 تسييل حقيقي لـ {sym} في {b_name} بسعر {cur_price}$ PnL: {pnl:+.3f}$", "danger")
@@ -843,7 +980,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args): return
 
 if __name__ == "__main__":
-    print(f"🚀 بدء تشغيل المنصة الحية على المنفذ: {PORT}")
+    print(f"🚀 بدء تشغيل Command Hub على المنفذ: {PORT}")
     threading.Thread(target=trading_engine_loop, daemon=True).start()
     with socketserver.TCPServer(("", PORT), WebHandler) as srv:
         srv.serve_forever()
