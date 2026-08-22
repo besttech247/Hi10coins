@@ -164,7 +164,7 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
     return mexc_private_request("/api/v3/order", method="POST", params=params)
 
 # =====================================================================
-# 🤖 محرك التداول الحقيقي وحساب القيمة الفعلية
+# 🤖 محرك التداول الحقيقي
 # =====================================================================
 def calculate_ewo(candles):
     if len(candles) < 38: return None, None, None
@@ -190,13 +190,13 @@ def trading_engine_loop():
                     shared_state["bots"][bKey]["daily_pnl_coins"] = {sym: 0.0 for sym in SYMBOLS}
                 add_log(f"🌅 بداية يوم تداول جديد ({now_day} UTC) - تصفير الأهداف اليومية", "info")
 
-            # 2. فحص أسعار العملات
+            # 2. تحديث أسعار السوق
             for sym in SYMBOLS:
                 bid, ask = get_orderbook(sym)
                 if bid and ask:
                     shared_state["market_prices"][sym] = {"bid": bid, "ask": ask}
 
-            # 3. تحديث أرصدة المحفظة الحقيقية والقيمة بالدولار
+            # 3. جلب كافة أرصدة المحفظة دون استثناء وحساب قيمتها
             ok, acc = mexc_private_request("/api/v3/account")
             if ok and "balances" in acc:
                 shared_state["api_connected"] = True
@@ -210,7 +210,8 @@ def trading_engine_loop():
                     total = free + locked
                     asset = b["asset"]
                     
-                    if total > 0.0001:
+                    # عرض أي عملة فيها رصيد موجب
+                    if total > 0.0:
                         usd_price = 1.0 if asset == "USDT" else shared_state["market_prices"].get(f"{asset}USDT", {}).get("bid", 0.0)
                         val_usd = total * usd_price
                         total_val_usd += val_usd
@@ -328,7 +329,7 @@ def trading_engine_loop():
                                             })
                                             add_log(f"[Bot 2 ({tf})] ⚡ شراء {sym} عند {ask}$ ({len(still_b2)+1}/5)", "primary")
 
-                # --- Bot 3 (Manual Trigger + Auto Bracket & Trailing) ---
+                # --- Bot 3 (Manual Trigger + Bracket) ---
                 if cfg_b3.get("status") != "STOPPED":
                     tp_pct = float(cfg_b3.get("tp_pct", 0.015))
                     sl_pct = float(cfg_b3.get("sl_pct", 0.005))
@@ -486,7 +487,7 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
     <button class="tab active" onclick="showTab('t1', this)">🤖 Bot 1 (EWO 5m)</button>
     <button class="tab" onclick="showTab('t2', this)">⚡ Bot 2 (EWO مخصص)</button>
     <button class="tab" onclick="showTab('t3', this)">🎯 Bot 3 (شراء يدوي + آلي)</button>
-    <button class="tab" onclick="showTab('t4', this)">💰 المحفظة والتسييل</button>
+    <button class="tab" onclick="showTab('t4', this)">💰 المحفظة الشاملة والتسييل</button>
   </div>
 
   <!-- Bot 1 (EWO 5m) -->
@@ -666,10 +667,16 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
     </div>
   </div>
 
-  <!-- Wallet & Panic Orders -->
+  <!-- Wallet & Advanced Panic -->
   <div id="t4" class="tab-pane">
     <div class="card">
-      <strong style="font-size:13px;display:block;margin-bottom:8px">💼 أرصدة المحفظة الحية والقيمة الفعلية بالدولار:</strong>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <strong style="font-size:13px">💼 أرصدة المحفظة الشاملة والقيمة الفعلية بالدولار:</strong>
+        <div style="display:flex;gap:6px">
+          <button class="btn" style="background:#8b5cf6;color:#fff" onclick="convertDust()">🔄 تحويل الأرصدة الصغيرة إلى MX</button>
+          <button class="btn" style="background:var(--danger);color:#fff" onclick="panicSellAll()">🔥 تسييل كل العملات إلى USDT</button>
+        </div>
+      </div>
       <div style="overflow-x:auto">
         <table id="w-table">
           <thead>
@@ -679,7 +686,7 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
               <th>المحجوز (Locked)</th>
               <th>السعر اللحظي</th>
               <th>القيمة الفعلية ($)</th>
-              <th>إجراء التسييل</th>
+              <th>إجراء التسييل الفردي</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -762,7 +769,7 @@ async function closeSinglePos(botName, sym, posId){
   }
 }
 
-// تسييل بسعر السوق
+// تسييل فردي بسعر السوق
 async function panicMarket(asset){
   if(confirm(`تسييل كامل رصيد ${asset} فورياً بسعر السوق (Market Order)؟`)){
     const r = await fetch('/api/panic',{method:'POST',body:JSON.stringify({asset:asset, order_type:'MARKET'})});
@@ -772,7 +779,7 @@ async function panicMarket(asset){
   }
 }
 
-// تسييل بأمر معلق محدد السعر
+// تسييل فردي بأمر ليميت
 async function panicLimit(asset, curPrice){
   const priceStr = prompt(`أدخل سعر البيع المطلوب لأمر LIMIT لعملة ${asset} (السعر اللحظي الحالي: ${curPrice}$):`, curPrice);
   if(priceStr){
@@ -788,6 +795,26 @@ async function panicLimit(asset, curPrice){
     } else {
       alert("يرجى إدخال سعر صحيح");
     }
+  }
+}
+
+// تحويل الأرصدة الصغيرة إلى MX
+async function convertDust(){
+  if(confirm("هل تريد تحويل كافة الأرصدة الصغيرة والغبار في المحفظة إلى عملة MX؟")){
+    const r = await fetch('/api/convert_dust', {method:'POST'});
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+
+// تسييل كل العملات دفعة واحدة إلى USDT
+async function panicSellAll(){
+  if(confirm("⚠️ تحذير: هل أنت متأكد من تسييل وبيع جميع العملات المتاحة دفعة واحدة بسعر السوق إلى USDT؟")){
+    const r = await fetch('/api/panic_all', {method:'POST'});
+    const d = await r.json();
+    alert(d.msg);
+    update();
   }
 }
 
@@ -877,7 +904,7 @@ async function update(){
     }
     document.getElementById('b3-market-table').querySelector('tbody').innerHTML = b3MHtml;
 
-    // جدول المحفظة مع القيمة الفعلية وخياري التسييل (سوق / أمر ليميت)
+    // جدول المحفظة الشاملة لكافة العملات
     let wHtml = '';
     (d.wallet_assets||[]).forEach(a=>{
       const canSell = a.asset !== 'USDT' && a.free > 0;
@@ -900,7 +927,7 @@ async function update(){
         </td>
       </tr>`;
     });
-    document.getElementById('w-table').querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أرصدة ظاهرة</td></tr>';
+    document.getElementById('w-table').querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أرصدة في المحفظة</td></tr>';
 
     let lHtml = '';
     logsText = '';
@@ -918,7 +945,7 @@ update();
 </html>"""
 
 # =====================================================================
-# 🛡️ خادم الويب ومعالجة الطلبات
+# 🛡️ خادم الويب ومعالجة مسارات التسييل والتحويل
 # =====================================================================
 class WebHandler(http.server.BaseHTTPRequestHandler):
     def is_auth(self):
@@ -1035,6 +1062,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": "✅ تم تسييل الصفقة بأمر بيع فوري في المنصة"}, ensure_ascii=False).encode('utf-8'))
 
+        # تسييل فردي (سوق أو ليميت)
         elif self.path == '/api/panic':
             asset = data.get("asset")
             order_type = data.get("order_type", "MARKET")
@@ -1056,6 +1084,35 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             else:
                 msg = "لا يوجد رصيد متاح للتسييل"
                 
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
+
+        # تحويل الأرصدة الصغيرة (Dust to MX)
+        elif self.path == '/api/convert_dust':
+            ok, res = mexc_private_request("/api/v3/capital/convert", method="POST")
+            if ok:
+                msg = "✅ تم تحويل الأرصدة الصغيرة بنجاح إلى MX!"
+                add_log(msg, "success")
+            else:
+                msg = f"❌ لم يتم التحويل: {res}"
+                add_log(msg, "warning")
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
+
+        # تسييل كل العملات دفعة واحدة إلى USDT
+        elif self.path == '/api/panic_all':
+            sold_count = 0
+            for a in shared_state.get("wallet_assets", []):
+                asset = a["asset"]
+                free_qty = float(a["free"])
+                if asset != "USDT" and free_qty > 0:
+                    sym = f"{asset}USDT"
+                    ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
+                    if ok:
+                        sold_count += 1
+                        add_log(f"🔥 تسييل جماعي لـ {asset} بنجاح", "danger")
+            
+            msg = f"✅ تم إرسال أوامر تسييل لـ {sold_count} عملات إلى USDT" if sold_count > 0 else "لا توجد عملات متاحة للتسييل"
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
