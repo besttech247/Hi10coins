@@ -7,7 +7,6 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    # جدول المستخدمين
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -16,7 +15,6 @@ def init_db():
     )
     """)
 
-    # جدول مفاتيح منصة MEXC
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS exchange_keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,12 +23,14 @@ def init_db():
     )
     """)
 
-    # جدول إعدادات البوتات (تداول حقيقي فقط)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS bots_config (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         bot_name TEXT UNIQUE NOT NULL,
         display_name TEXT NOT NULL,
+        symbols TEXT DEFAULT 'NEARUSDT, AVAXUSDT, SOLUSDT',
+        max_allocation_usdt REAL DEFAULT 100.0,
+        max_concurrent_per_coin INTEGER DEFAULT 3,
         trade_size_usdt REAL DEFAULT 10.0,
         timeframe TEXT DEFAULT '5m',
         tp_pct REAL DEFAULT 0.015,
@@ -41,24 +41,26 @@ def init_db():
     )
     """)
 
-    # حساب المدير الافتراضي: admin / admin123
     default_pass = hashlib.sha256("admin123".encode('utf-8')).hexdigest()
     cursor.execute("INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'admin', ?)", (default_pass,))
     cursor.execute("INSERT OR IGNORE INTO exchange_keys (id, api_key, api_secret) VALUES (1, '', '')")
 
-    # تهيئة البوتات الثلاثة
+    # إضافة أو تحديث إعدادات البوتات بالحقول الجديدة
+    default_symbols = "NEARUSDT, AVAXUSDT, SOLUSDT, DOGEUSDT, BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, ADAUSDT, LINKUSDT"
     cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', 10.0, '5m', 0.015, 0.0049, 0, 'RUNNING')
-    """)
+    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
+    VALUES (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', ?, 100.0, 3, 10.0, '5m', 0.015, 0.0049, 0, 'RUNNING')
+    """, (default_symbols,))
+    
     cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (2, 'BOT_2', '⚡ Bot 2 (EWO Custom TF)', 10.0, '15m', 0.02, 0.006, 0, 'PAUSED')
-    """)
+    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
+    VALUES (2, 'BOT_2', '⚡ Bot 2 (EWO Custom TF)', ?, 100.0, 3, 10.0, '15m', 0.02, 0.006, 0, 'PAUSED')
+    """, (default_symbols,))
+
     cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (3, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Auto Bracket)', 10.0, '1m', 0.015, 0.005, 1, 'RUNNING')
-    """)
+    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
+    VALUES (3, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Auto Bracket)', ?, 100.0, 3, 10.0, '1m', 0.015, 0.005, 1, 'RUNNING')
+    """, (default_symbols,))
 
     conn.commit()
     conn.close()
