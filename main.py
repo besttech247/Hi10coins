@@ -24,7 +24,6 @@ ACTIVE_SESSIONS = set()
 ssl_ctx = ssl._create_unverified_context()
 START_TIME = time.time()
 
-# التخزين الديناميكي لدقة الكسور للأزواج
 SYMBOL_RULES = {}
 
 shared_state = {
@@ -257,7 +256,6 @@ def trading_engine_loop():
                         shared_state["bots"][bKey]["daily_pnl_coins"][s] = 0.0
                 add_log(f"🌅 تصفير الأهداف اليومية ({now_day} UTC)", "system", "info")
 
-            # جلب إعدادات البوتات الثلاثة
             configs = {
                 "BOT_1": database.get_bot_config("BOT_1"),
                 "BOT_2": database.get_bot_config("BOT_2"),
@@ -272,7 +270,6 @@ def trading_engine_loop():
                 shared_state["bots"][bKey]["max_allocation"] = float(cfg.get("max_allocation_usdt", 100.0))
                 shared_state["bots"][bKey]["max_concurrent"] = int(cfg.get("max_concurrent_per_coin", 3))
                 
-                # تهيئة القواميس للعملات الجديدة
                 for s in syms:
                     all_active_symbols.add(s)
                     if s not in shared_state["bots"][bKey]["active_positions"]:
@@ -280,13 +277,11 @@ def trading_engine_loop():
                     if s not in shared_state["bots"][bKey]["daily_pnl_coins"]:
                         shared_state["bots"][bKey]["daily_pnl_coins"][s] = 0.0
 
-            # تحديث أسعار كافة العملات النشطة
             for sym in all_active_symbols:
                 bid, ask = get_orderbook(sym)
                 if bid and ask:
                     shared_state["market_prices"][sym] = {"bid": bid, "ask": ask}
 
-            # تحديث المحفظة
             ok, acc = mexc_private_request("/api/v3/account")
             if ok and isinstance(acc, dict) and "balances" in acc:
                 shared_state["api_connected"] = True
@@ -310,7 +305,6 @@ def trading_engine_loop():
             else:
                 shared_state["api_connected"] = False
 
-            # تنفيذ الصفقات لكل بوت
             for bKey in ["BOT_1", "BOT_2", "BOT_3"]:
                 cfg = configs[bKey]
                 if cfg.get("status") == "STOPPED": continue
@@ -320,7 +314,6 @@ def trading_engine_loop():
                 max_alloc = shared_state["bots"][bKey]["max_allocation"]
                 max_con = shared_state["bots"][bKey]["max_concurrent"]
                 
-                # حساب السيولة المحجوزة الحالية للبوت
                 total_open_trades = sum(len(shared_state["bots"][bKey]["active_positions"].get(s, [])) for s in sym_list)
                 current_used_cap = total_open_trades * size
 
@@ -330,7 +323,7 @@ def trading_engine_loop():
                     bid = p_info["bid"]
                     ask = p_info["ask"]
 
-                    # 🤖 إدارة Bot 1 و Bot 2
+                    # Bot 1 & Bot 2
                     if bKey in ["BOT_1", "BOT_2"]:
                         tf = "5m" if bKey == "BOT_1" else cfg.get("timeframe", "15m")
                         candles = fetch_klines(sym, interval=tf, limit=45)
@@ -357,7 +350,6 @@ def trading_engine_loop():
                                     else: still_pos.append(pos)
                                 shared_state["bots"][bKey]["active_positions"][sym] = still_pos
 
-                                # شروط الدخول
                                 sig_rebound = (e1 < 0 and e1 > e2 and e2 <= e3)
                                 can_open_coin = len(still_pos) < max_con
                                 can_open_alloc = (current_used_cap + size) <= max_alloc
@@ -375,7 +367,7 @@ def trading_engine_loop():
                                                 current_used_cap += size
                                                 add_log(f"🚀 [{bKey}] شراء {sym} عند {ask}$ ({len(still_pos)+1}/{max_con})", "buys", "primary")
 
-                    # 🎯 إدارة Bot 3 (Manual Trigger + Auto Bracket)
+                    # Bot 3
                     elif bKey == "BOT_3":
                         tp_pct = float(cfg.get("tp_pct", 0.015))
                         sl_pct = float(cfg.get("sl_pct", 0.005))
@@ -418,7 +410,7 @@ def trading_engine_loop():
         time.sleep(7)
 
 # =====================================================================
-# 🌐 واجهات HTML الموحدة
+# 🌐 واجهات HTML
 # =====================================================================
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -526,7 +518,6 @@ summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
     </div>
   </div>
 
-  <!-- مفاتيح المنصة وكلمة المرور -->
   <details id="keys-box">
     <summary style="color:#60a5fa">🔑 الإعدادات و IP السيرفر ▾ <span id="keys-status-badge"></span></summary>
     <div style="padding:10px">
@@ -583,23 +574,22 @@ summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
     </div>
 
     <details>
-      <summary style="color:#a78bfa">⚙️ العملات وسقف رأس المال (Bot 1) ▾</summary>
+      <summary style="color:#a78bfa">⚙️ سقف رأس المال والصفقات (Bot 1) ▾</summary>
       <div class="form-row">
-        <div style="grid-column:1/-1">
-          <label style="font-size:11px;color:var(--sub)">قائمة العملات المخصصة (مفصولة بفواصل)</label>
-          <input type="text" id="b1-symbols" value="NEARUSDT, SOLUSDT, AVAXUSDT">
-        </div>
         <div><label style="font-size:11px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="b1-alloc" value="100"></div>
         <div><label style="font-size:11px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="b1-maxcon" value="3"></div>
         <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="b1-size" value="10"></div>
         <div><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="b1-sl" value="0.49" step="0.01"></div>
-        <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('BOT_1', 'b1')">💾 حفظ</button></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('BOT_1', 'b1')">💾 حفظ الإعدادات</button></div>
       </div>
     </details>
 
     <div class="card">
-      <strong style="font-size:12px;display:block;margin-bottom:4px">📊 جدول العملات وأرباح اليوم:</strong>
-      <div style="overflow-x:auto"><table id="b1-coins-table"><thead><tr><th>العملة</th><th>السعر</th><th>ربح اليوم</th><th>الصفقات</th><th>دخول</th></tr></thead><tbody></tbody></table></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <strong style="font-size:12px">📊 جدول العملات وأرباح اليوم:</strong>
+        <button class="btn" style="background:#10b981;color:#fff;font-size:11px;padding:3px 8px" onclick="addCoinToBot('BOT_1')">➕ إضافة عملة</button>
+      </div>
+      <div style="overflow-x:auto"><table id="b1-coins-table"><thead><tr><th>العملة</th><th>السعر</th><th>ربح اليوم</th><th>الصفقات</th><th>دخول</th><th>حذف</th></tr></thead><tbody></tbody></table></div>
     </div>
 
     <div class="card">
@@ -637,12 +627,8 @@ summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
     </div>
 
     <details>
-      <summary style="color:#a78bfa">⚙️ الفريم والعملات وسقف رأس المال (Bot 2) ▾</summary>
+      <summary style="color:#a78bfa">⚙️ الفريم وسقف رأس المال (Bot 2) ▾</summary>
       <div class="form-row">
-        <div style="grid-column:1/-1">
-          <label style="font-size:11px;color:var(--sub)">قائمة العملات المخصصة</label>
-          <input type="text" id="b2-symbols" value="NEARUSDT, SOLUSDT">
-        </div>
         <div>
           <label style="font-size:11px;color:var(--sub)">الفريم الزمني</label>
           <select id="b2-tf">
@@ -658,8 +644,11 @@ summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
     </details>
 
     <div class="card">
-      <strong style="font-size:12px;display:block;margin-bottom:4px">📊 جدول العملات وأرباح اليوم:</strong>
-      <div style="overflow-x:auto"><table id="b2-coins-table"><thead><tr><th>العملة</th><th>السعر</th><th>ربح اليوم</th><th>الصفقات</th><th>دخول</th></tr></thead><tbody></tbody></table></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <strong style="font-size:12px">📊 جدول العملات وأرباح اليوم:</strong>
+        <button class="btn" style="background:#10b981;color:#fff;font-size:11px;padding:3px 8px" onclick="addCoinToBot('BOT_2')">➕ إضافة عملة</button>
+      </div>
+      <div style="overflow-x:auto"><table id="b2-coins-table"><thead><tr><th>العملة</th><th>السعر</th><th>ربح اليوم</th><th>الصفقات</th><th>دخول</th><th>حذف</th></tr></thead><tbody></tbody></table></div>
     </div>
 
     <div class="card">
@@ -698,10 +687,6 @@ summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
     <details open>
       <summary style="color:#38bdf8">🎯 إعدادات الدخول اليدوي والـ Trailing Stop ▾</summary>
       <div class="form-row">
-        <div style="grid-column:1/-1">
-          <label style="font-size:11px;color:var(--sub)">قائمة عملات التداول السريع</label>
-          <input type="text" id="b3-symbols" value="NEARUSDT, SOLUSDT, BTCUSDT, ETHUSDT">
-        </div>
         <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="b3-size" value="10"></div>
         <div><label style="font-size:11px;color:var(--sub)">جني الأرباح (TP %)</label><input type="number" id="b3-tp" value="1.5" step="0.1"></div>
         <div><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="b3-sl" value="0.5" step="0.1"></div>
@@ -714,8 +699,11 @@ summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
     </details>
 
     <div class="card">
-      <strong style="font-size:12px;display:block;margin-bottom:4px">⚡ إطلاق صفقة سريعة (شراء فوري وتسليم للآلي):</strong>
-      <div style="overflow-x:auto"><table id="b3-market-table"><thead><tr><th>العملة</th><th>السعر</th><th>إطلاق بنقرة</th></tr></thead><tbody></tbody></table></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <strong style="font-size:12px">⚡ عملات التداول السريع:</strong>
+        <button class="btn" style="background:#10b981;color:#fff;font-size:11px;padding:3px 8px" onclick="addCoinToBot('BOT_3')">➕ إضافة عملة</button>
+      </div>
+      <div style="overflow-x:auto"><table id="b3-market-table"><thead><tr><th>العملة</th><th>السعر</th><th>إطلاق بنقرة</th><th>حذف</th></tr></thead><tbody></tbody></table></div>
     </div>
 
     <div class="card">
@@ -769,7 +757,6 @@ let currentLogFilter = "all";
 let startTs = Date.now();
 let keysLoaded = false;
 let currentPublicIP = "";
-let initialFormPopulated = false;
 
 function showTab(id, btn){
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
@@ -807,10 +794,37 @@ async function changePass(){
   const res = await fetch('/api/change_password', {method:'POST', body:JSON.stringify({new_password:p})});
   if(res.ok){ alert("✅ تم التغيير!"); document.getElementById('new-pass').value = ''; }
 }
+
+// دالة إضافة عملة جديدة للبوت
+async function addCoinToBot(botName){
+  const coin = prompt(`أدخل رمز العملة المراد إضافتها لـ ${botName} (مثال: SOL أو SUI أو NEAR):`);
+  if(coin && coin.trim()){
+    const r = await fetch('/api/add_symbol', {
+      method: 'POST',
+      body: JSON.stringify({bot_name: botName, symbol: coin.trim().toUpperCase()})
+    });
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+
+// دالة حذف عملة مع رسالة تأكيد
+async function removeCoinFromBot(botName, sym){
+  if(confirm(`⚠️ هل أنت متأكد من حذف العملة (${sym}) من قائمة تداول ${botName}؟`)){
+    const r = await fetch('/api/remove_symbol', {
+      method: 'POST',
+      body: JSON.stringify({bot_name: botName, symbol: sym})
+    });
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+
 async function saveBotCfg(botName, prefix){
   const payload = {
     bot_name: botName,
-    symbols: document.getElementById(prefix+'-symbols').value,
     max_allocation_usdt: parseFloat(document.getElementById(prefix+'-alloc').value)||100,
     max_concurrent_per_coin: parseInt(document.getElementById(prefix+'-maxcon').value)||3,
     trade_size_usdt: parseFloat(document.getElementById(prefix+'-size').value)||10
@@ -939,16 +953,9 @@ async function update(){
       }
     }
 
-    // تحديث بيانات البوتات
     ['BOT_1', 'BOT_2', 'BOT_3'].forEach(bKey => {
       const pfx = bKey === 'BOT_1' ? 'b1' : (bKey === 'BOT_2' ? 'b2' : 'b3');
       const bObj = d.bots[bKey];
-      
-      // تعبئة حقول العملات لأول مرة فقط
-      if(!initialFormPopulated && bObj.symbols && bObj.symbols.length > 0){
-        document.getElementById(pfx+'-symbols').value = bObj.symbols.join(", ");
-        if(bKey==='BOT_3') initialFormPopulated = true;
-      }
 
       const stEl = document.getElementById(pfx+'-st');
       stEl.innerText = bObj.status || 'RUNNING';
@@ -968,7 +975,7 @@ async function update(){
       document.getElementById(pfx+'-winrate').innerText = wr + '%';
       document.getElementById(pfx+'-trade-stats').innerText = `${totalT} صفقات (${winT} رابحة)`;
 
-      // جدول العملات الخاص بالبوت
+      // جدول العملات الخاص بالبوت مع زر الحذف المنفصل
       let totalOpen = 0;
       let coinsTableHtml = '';
       (bObj.symbols || []).forEach(sym => {
@@ -982,12 +989,13 @@ async function update(){
           <td>${price ? price.toFixed(4)+'$' : '-'}</td>
           <td style="color:${coinPnl>=0?'var(--success)':'var(--danger)'};font-weight:bold">${(coinPnl>=0?'+':'')+coinPnl.toFixed(3)}$</td>
           <td><span class="badge ${count>0?'badge-active':'badge-idle'}">${count}/${bObj.max_concurrent}</span></td>
-          <td><button class="icon-btn" style="background:var(--primary);color:#fff" title="شراء" onclick="triggerBuy('${bKey}','${sym}')">⚡</button></td>
+          <td><button class="icon-btn" style="background:var(--primary);color:#fff" title="شراء فوري" onclick="triggerBuy('${bKey}','${sym}')">⚡</button></td>
+          <td><button class="icon-btn" style="background:#334155;color:#f87171" title="حذف من الجدول" onclick="removeCoinFromBot('${bKey}','${sym}')">🗑️</button></td>
         </tr>`;
       });
 
       if(document.getElementById(pfx+'-coins-table')){
-        document.getElementById(pfx+'-coins-table').querySelector('tbody').innerHTML = coinsTableHtml || '<tr><td colspan="5" style="text-align:center">لم يتم تحديد عملات</td></tr>';
+        document.getElementById(pfx+'-coins-table').querySelector('tbody').innerHTML = coinsTableHtml || '<tr><td colspan="6" style="text-align:center">لا توجد عملات مضافة حالياً</td></tr>';
       }
       
       const usedUsd = totalOpen * (parseFloat(document.getElementById(pfx+'-size').value)||10);
@@ -1011,9 +1019,14 @@ async function update(){
     (d.bots["BOT_3"].symbols || []).forEach(sym => {
       const p = d.market_prices[sym];
       const ask = p ? p.ask : 0.0;
-      b3MHtml += `<tr><td><strong>${sym}</strong></td><td>${ask>0?ask+'$':'-'}</td><td><button class="btn" style="background:#0ea5e9;color:#fff;font-size:11px" onclick="triggerBuy('BOT_3','${sym}')">🎯 شراء وتسليم</button></td></tr>`;
+      b3MHtml += `<tr>
+        <td><strong>${sym}</strong></td>
+        <td>${ask>0?ask+'$':'-'}</td>
+        <td><button class="btn" style="background:#0ea5e9;color:#fff;font-size:11px" onclick="triggerBuy('BOT_3','${sym}')">🎯 شراء وتسليم</button></td>
+        <td><button class="icon-btn" style="background:#334155;color:#f87171" title="حذف من القائمة" onclick="removeCoinFromBot('BOT_3','${sym}')">🗑️</button></td>
+      </tr>`;
     });
-    document.getElementById('b3-market-table').querySelector('tbody').innerHTML = b3MHtml || '<tr><td colspan="3" style="text-align:center">لم تحدد عملات</td></tr>';
+    document.getElementById('b3-market-table').querySelector('tbody').innerHTML = b3MHtml || '<tr><td colspan="4" style="text-align:center">لا توجد عملات مضافة</td></tr>';
 
     // جدول المحفظة
     let wHtml = '';
@@ -1051,7 +1064,7 @@ update();
 </html>"""
 
 # =====================================================================
-# 🛡️ خادم الويب والمسارات
+# 🛡️ خادم الويب ومعالجة مسارات إضافة/حذف العملات
 # =====================================================================
 class WebHandler(http.server.BaseHTTPRequestHandler):
     def is_auth(self):
@@ -1132,6 +1145,44 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             database.update_bot_config(b_name, data)
             add_log(f"تم حفظ إعدادات {b_name}", "system", "info")
             self.send_response(200); self.end_headers()
+
+        # إضافة عملة للبوت
+        elif self.path == '/api/add_symbol':
+            b_name = data.get("bot_name", "BOT_1")
+            raw_sym = data.get("symbol", "").strip().upper()
+            if raw_sym:
+                if not raw_sym.endswith("USDT") and not raw_sym.endswith("USDC"):
+                    raw_sym = f"{raw_sym}USDT"
+                
+                cfg = database.get_bot_config(b_name)
+                current_syms = parse_symbols_list(cfg.get("symbols", ""))
+                if raw_sym not in current_syms:
+                    current_syms.append(raw_sym)
+                    database.update_bot_config(b_name, {"symbols": ", ".join(current_syms)})
+                    add_log(f"➕ إضافة {raw_sym} إلى قائمة {b_name}", "system", "success")
+                    msg = f"✅ تمت إضافة {raw_sym} بنجاح!"
+                else:
+                    msg = "العملة موجودة بالفعل في القائمة"
+            else:
+                msg = "رمز العملة غير صالح"
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
+
+        # حذف عملة من البوت
+        elif self.path == '/api/remove_symbol':
+            b_name = data.get("bot_name", "BOT_1")
+            sym = data.get("symbol", "").strip().upper()
+            cfg = database.get_bot_config(b_name)
+            current_syms = parse_symbols_list(cfg.get("symbols", ""))
+            if sym in current_syms:
+                current_syms.remove(sym)
+                database.update_bot_config(b_name, {"symbols": ", ".join(current_syms)})
+                add_log(f"🗑️ إزالة {sym} من قائمة {b_name}", "system", "warning")
+                msg = f"✅ تم حذف {sym} من {b_name}"
+            else:
+                msg = "العملة غير موجودة"
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
         elif self.path == '/api/manual_buy':
             sym = data.get("symbol")
