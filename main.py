@@ -16,7 +16,6 @@ from http import cookies
 from datetime import datetime, timezone
 import database
 
-# ضبط المنفذ المتوافق مع بيئة Railway
 PORT = int(os.environ.get("PORT", 8080))
 database.init_db()
 
@@ -44,6 +43,7 @@ shared_state = {
     "api_connected": False,
     "has_saved_keys": False,
     "masked_key": "",
+    "server_public_ip": "جاري الجلب...",
     "real_balance_usdt": 0.0,
     "total_wallet_usd_value": 0.0,
     "wallet_assets": [],
@@ -88,22 +88,42 @@ shared_state = {
     }
 }
 
-def add_log(msg, log_type="info"):
+# دالة تسجيل الأحداث مع تصنيف نوع السجل (category)
+def add_log(msg, category="system", log_type="info"):
     timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    shared_state["recent_logs"].insert(0, {"time": timestamp, "msg": msg, "type": log_type})
-    if len(shared_state["recent_logs"]) > 120:
+    shared_state["recent_logs"].insert(0, {
+        "time": timestamp,
+        "msg": msg,
+        "cat": category,
+        "type": log_type
+    })
+    if len(shared_state["recent_logs"]) > 300:
         shared_state["recent_logs"].pop()
 
+def fetch_server_ip():
+    try:
+        req = urllib.request.Request("https://api.ipify.org?format=json", headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=5) as res:
+            d = json.loads(res.read().decode('utf-8'))
+            shared_state["server_public_ip"] = d.get("ip", "غير متوفر")
+    except Exception:
+        shared_state["server_public_ip"] = "تعذر تحديد IP"
+
 # =====================================================================
-# 🔐 محرك MEXC API ودقة الكسور ومزامنة الوقت
+# 🔐 محرك MEXC API ودقة الكسور
 # =====================================================================
+def sanitize_str(val):
+    if not val:
+        return ""
+    return str(val).strip().replace("\r", "").replace("\n", "").replace("\t", "").replace(" ", "")
+
 def sign_query(query_string, secret):
     return hmac.new(secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
 
 def mexc_private_request(endpoint, method="GET", params=None):
     keys = database.get_keys()
-    api_key = keys.get("api_key", "").strip()
-    api_secret = keys.get("api_secret", "").strip()
+    api_key = sanitize_str(keys.get("api_key", ""))
+    api_secret = sanitize_str(keys.get("api_secret", ""))
 
     if not api_key or not api_secret:
         shared_state["has_saved_keys"] = False
@@ -187,10 +207,15 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
             params["quantity"] = format_quantity(symbol, qty)
         else:
             return False, "تحديد الكمية مطلوب"
-    return mexc_private_request("/api/v3/order", method="POST", params=params)
+    
+    add_log(f"📤 إرسال طلب {side.upper()} لـ {symbol} ({order_type})", "orders", "info")
+    ok, res = mexc_private_request("/api/v3/order", method="POST", params=params)
+    if not ok:
+        add_log(f"❌ خطأ تنفيذ أمر {symbol}: {res}", "orders", "danger")
+    return ok, res
 
 # =====================================================================
-# 🤖 محرك التداول الحقيقي
+# 🤖 محرك التداول الحقيقي وتسجيل الأحداث
 # =====================================================================
 def calculate_ewo(candles):
     if len(candles) < 38:
@@ -205,8 +230,9 @@ def calculate_ewo(candles):
     return vals[0], vals[1], vals[2]
 
 def trading_engine_loop():
+    fetch_server_ip()
     time.sleep(2)
-    add_log("تم تشغيل محرك التداول المركزي ومراقبة المحفظة", "info")
+    add_log(f"تم بدء تشغيل محرك التداول (IP: {shared_state['server_public_ip']})", "system", "info")
     while True:
         try:
             now_day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -215,7 +241,7 @@ def trading_engine_loop():
                 for bKey in ["BOT_1", "BOT_2", "BOT_3"]:
                     shared_state["bots"][bKey]["daily_pnl"] = 0.0
                     shared_state["bots"][bKey]["daily_pnl_coins"] = {sym: 0.0 for sym in SYMBOLS}
-                add_log(f"🌅 بداية يوم تداول جديد ({now_day} UTC) - تصفير الأهداف اليومية", "info")
+                add_log(f"🌅 بداية يوم تداول جديد ({now_day} UTC) - تصفير الأهداف", "system", "info")
 
             for sym in SYMBOLS:
                 bid, ask = get_orderbook(sym)
@@ -273,7 +299,9 @@ def trading_engine_loop():
                 if not bid:
                     continue
 
-                # Bot 1
+                # -------------------------------------------------------------
+                # Bot 1 (EWO 5m)
+                # -------------------------------------------------------------
                 if cfg_b1.get("status") != "STOPPED":
                     candles_b1 = fetch_klines(sym, interval="5m", limit=45)
                     if candles_b1:
@@ -285,7 +313,13 @@ def trading_engine_loop():
                             still_b1 = []
                             for pos in shared_state["bots"]["BOT_1"]["active_positions"].get(sym, []):
                                 sl = pos['entry_price'] * (1.0 - sl_pct)
-                                if bid <= sl or ((e2 > 0) and (e1 < e2)):
+                                hit_sl = bid <= sl
+                                hit_rev = (e2 > 0) and (e1 < e2)
+
+                                if hit_sl or hit_rev:
+                                    reason_lbl = "🛑 ضرب وقف الخسارة (SL)" if hit_sl else "🎯 انعكاس مؤشر EWO"
+                                    add_log(f"[Bot 1] إشارة خروج لـ {sym}: {reason_lbl}", "signals", "warning")
+                                    
                                     ok, res = place_order(sym, "SELL", qty=pos['qty'])
                                     if ok:
                                         pnl = (bid - pos['entry_price']) * pos['qty']
@@ -293,14 +327,20 @@ def trading_engine_loop():
                                         shared_state["bots"]["BOT_1"]["daily_pnl_coins"][sym] += pnl
                                         shared_state["bots"]["BOT_1"]["trades_count"] += 1
                                         if pnl > 0: shared_state["bots"]["BOT_1"]["winning_count"] += 1
-                                        add_log(f"[Bot 1] بيع {sym} PnL: {pnl:+.3f}$", "success" if pnl > 0 else "danger")
-                                    else: still_b1.append(pos)
-                                else: still_b1.append(pos)
+                                        add_log(f"💰 [Bot 1] إغلاق صفقة {sym} | PnL: {pnl:+.3f}$ ({reason_lbl})", "sells", "success" if pnl > 0 else "danger")
+                                    else:
+                                        still_b1.append(pos)
+                                else:
+                                    still_b1.append(pos)
                             shared_state["bots"]["BOT_1"]["active_positions"][sym] = still_b1
+
+                            # فحص إشارة الدخول
+                            sig_rebound = (e1 < 0 and e1 > e2 and e2 <= e3)
+                            if sig_rebound:
+                                add_log(f"🎯 [Bot 1] رصد إشارة ارتداد EWO لـ {sym} (e1:{e1:.4f} > e2:{e2:.4f})", "signals", "info")
 
                             b1_coin_locked = shared_state["bots"]["BOT_1"]["daily_pnl_coins"].get(sym, 0.0) >= shared_state["bots"]["BOT_1"]["daily_coin_target"]
                             can_open = len(still_b1) < 5
-                            sig_rebound = (e1 < 0 and e1 > e2 and e2 <= e3)
 
                             if cfg_b1.get("status") == "RUNNING" and can_open and sig_rebound and not b1_target_locked and not b1_coin_locked:
                                 if shared_state["real_balance_usdt"] >= size:
@@ -311,9 +351,13 @@ def trading_engine_loop():
                                             shared_state["bots"]["BOT_1"]["active_positions"][sym].append({
                                                 'id': f"b1_{int(time.time()*1000)}", 'entry_price': ask, 'qty': q, 'time': datetime.now(timezone.utc).strftime("%H:%M")
                                             })
-                                            add_log(f"[Bot 1] 🚀 شراء {sym} عند {ask}$ ({len(still_b1)+1}/5)", "primary")
+                                            add_log(f"🚀 [Bot 1] تنفيذ شراء {sym} بسعر {ask}$ ({len(still_b1)+1}/5)", "buys", "primary")
+                                else:
+                                    add_log(f"⚠️ [Bot 1] تخطي شراء {sym}: الرصيد المتاح ({shared_state['real_balance_usdt']:.2f}$) أقل من {size}$", "signals", "warning")
 
-                # Bot 2
+                # -------------------------------------------------------------
+                # Bot 2 (EWO Custom TF)
+                # -------------------------------------------------------------
                 if cfg_b2.get("status") != "STOPPED":
                     tf = cfg_b2.get("timeframe", "15m")
                     candles_b2 = fetch_klines(sym, interval=tf, limit=45)
@@ -326,7 +370,12 @@ def trading_engine_loop():
                             still_b2 = []
                             for pos in shared_state["bots"]["BOT_2"]["active_positions"].get(sym, []):
                                 sl = pos['entry_price'] * (1.0 - sl_pct2)
-                                if bid <= sl or ((e2 > 0) and (e1 < e2)):
+                                hit_sl2 = bid <= sl
+                                hit_rev2 = (e2 > 0) and (e1 < e2)
+
+                                if hit_sl2 or hit_rev2:
+                                    reason_lbl2 = "🛑 ضرب SL" if hit_sl2 else "🎯 انعكاس EWO"
+                                    add_log(f"[Bot 2 ({tf})] إشارة خروج لـ {sym}: {reason_lbl2}", "signals", "warning")
                                     ok, res = place_order(sym, "SELL", qty=pos['qty'])
                                     if ok:
                                         pnl = (bid - pos['entry_price']) * pos['qty']
@@ -334,14 +383,19 @@ def trading_engine_loop():
                                         shared_state["bots"]["BOT_2"]["daily_pnl_coins"][sym] += pnl
                                         shared_state["bots"]["BOT_2"]["trades_count"] += 1
                                         if pnl > 0: shared_state["bots"]["BOT_2"]["winning_count"] += 1
-                                        add_log(f"[Bot 2 ({tf})] بيع {sym} PnL: {pnl:+.3f}$", "success" if pnl > 0 else "danger")
-                                    else: still_b2.append(pos)
-                                else: still_b2.append(pos)
+                                        add_log(f"💰 [Bot 2 ({tf})] إغلاق صفقة {sym} | PnL: {pnl:+.3f}$", "sells", "success" if pnl > 0 else "danger")
+                                    else:
+                                        still_b2.append(pos)
+                                else:
+                                    still_b2.append(pos)
                             shared_state["bots"]["BOT_2"]["active_positions"][sym] = still_b2
+
+                            sig_rebound2 = (e1 < 0 and e1 > e2 and e2 <= e3)
+                            if sig_rebound2:
+                                add_log(f"🎯 [Bot 2 ({tf})] رصد إشارة ارتداد لـ {sym}", "signals", "info")
 
                             b2_coin_locked = shared_state["bots"]["BOT_2"]["daily_pnl_coins"].get(sym, 0.0) >= shared_state["bots"]["BOT_2"]["daily_coin_target"]
                             can_open2 = len(still_b2) < 5
-                            sig_rebound2 = (e1 < 0 and e1 > e2 and e2 <= e3)
 
                             if cfg_b2.get("status") == "RUNNING" and can_open2 and sig_rebound2 and not b2_target_locked and not b2_coin_locked:
                                 if shared_state["real_balance_usdt"] >= size2:
@@ -352,9 +406,11 @@ def trading_engine_loop():
                                             shared_state["bots"]["BOT_2"]["active_positions"][sym].append({
                                                 'id': f"b2_{int(time.time()*1000)}", 'entry_price': ask, 'qty': q, 'time': datetime.now(timezone.utc).strftime("%H:%M")
                                             })
-                                            add_log(f"[Bot 2 ({tf})] ⚡ شراء {sym} عند {ask}$ ({len(still_b2)+1}/5)", "primary")
+                                            add_log(f"⚡ [Bot 2 ({tf})] تنفيذ شراء {sym} بسعر {ask}$", "buys", "primary")
 
-                # Bot 3
+                # -------------------------------------------------------------
+                # Bot 3 (Manual Trigger + Auto Bracket & Trailing)
+                # -------------------------------------------------------------
                 if cfg_b3.get("status") != "STOPPED":
                     tp_pct = float(cfg_b3.get("tp_pct", 0.015))
                     sl_pct = float(cfg_b3.get("sl_pct", 0.005))
@@ -380,6 +436,9 @@ def trading_engine_loop():
                         hit_sl = bid <= effective_sl
 
                         if hit_tp or hit_sl:
+                            reason = "🎯 جني أرباح TP" if hit_tp else ("🔄 تريلينج ستوب TS" if use_ts and effective_sl > sl_price else "🛑 وقف خسارة SL")
+                            add_log(f"[Bot 3] إشارة خروج لـ {sym}: {reason}", "signals", "warning")
+                            
                             ok, res = place_order(sym, "SELL", qty=pos['qty'])
                             if ok:
                                 pnl = (bid - entry) * pos['qty']
@@ -387,8 +446,7 @@ def trading_engine_loop():
                                 shared_state["bots"]["BOT_3"]["daily_pnl_coins"][sym] += pnl
                                 shared_state["bots"]["BOT_3"]["trades_count"] += 1
                                 if pnl > 0: shared_state["bots"]["BOT_3"]["winning_count"] += 1
-                                reason = "🎯 جني أرباح TP" if hit_tp else ("🔄 تريلينج ستوب" if use_ts and effective_sl > sl_price else "🛑 وقف خسارة SL")
-                                add_log(f"[Bot 3] {reason} لـ {sym} PnL: {pnl:+.3f}$", "success" if pnl > 0 else "danger")
+                                add_log(f"💰 [Bot 3] إغلاق صفقة {sym} | PnL: {pnl:+.3f}$ ({reason})", "sells", "success" if pnl > 0 else "danger")
                             else:
                                 still_b3.append(pos)
                         else:
@@ -397,12 +455,12 @@ def trading_engine_loop():
                     shared_state["bots"]["BOT_3"]["active_positions"][sym] = still_b3
 
         except Exception as e:
-            add_log(f"خطأ المحرك: {e}", "warning")
+            add_log(f"خطأ في محرك التداول: {e}", "system", "warning")
 
         time.sleep(7)
 
 # =====================================================================
-# 🌐 واجهات HTML الموحدة
+# 🌐 واجهات HTML ولوحة السجلات التفاعلية
 # =====================================================================
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -461,13 +519,19 @@ th{color:var(--sub)}
 .badge{padding:2px 8px;border-radius:6px;font-size:11px;font-weight:bold}
 .badge-active{background:#10b98122;color:var(--success)}
 .badge-idle{background:#64748b22;color:var(--sub)}
-.logs{max-height:180px;overflow-y:auto;font-family:monospace;font-size:11px}
+.logs{max-height:240px;overflow-y:auto;font-family:monospace;font-size:11px;background:#090d16;padding:8px;border-radius:8px;border:1px solid var(--border)}
+.log-item{padding:4px 6px;border-bottom:1px solid #1f293d44;display:flex;gap:8px;align-items:flex-start}
+.log-badge{padding:1px 6px;border-radius:4px;font-size:10px;font-weight:bold;white-space:nowrap}
 input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px 10px;border-radius:6px;font-size:12px;width:100%}
 details{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden}
 summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
 .form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;padding:10px}
 .badge-live{background:#10b98122;color:#10b981;border:1px solid #10b98144;padding:2px 6px;border-radius:4px;font-size:11px}
 .action-cell{display:flex;gap:4px;align-items:center}
+.ip-box{background:#090d16;padding:8px 12px;border-radius:8px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.log-filters{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px}
+.log-btn{padding:3px 8px;font-size:11px;background:#151e30;color:var(--sub);border:1px solid var(--border);border-radius:6px;cursor:pointer}
+.log-btn.active{background:#3b82f6;color:#fff;font-weight:bold}
 </style>
 </head>
 <body>
@@ -490,8 +554,16 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
   </div>
 
   <details id="keys-box">
-    <summary style="color:#60a5fa">🔑 إعدادات MEXC API وكلمة المرور ▾ <span id="keys-status-badge" style="font-size:11px;color:var(--sub)"></span></summary>
+    <summary style="color:#60a5fa">🔑 إعدادات MEXC API و عنوان IP السيرفر ▾ <span id="keys-status-badge" style="font-size:11px;color:var(--sub)"></span></summary>
     <div style="padding:10px">
+      <div class="ip-box">
+        <div>
+          <span style="font-size:11px;color:var(--sub)">🌐 الآي بي العام للسيرفر (Public IP):</span>
+          <strong id="server-ip-val" style="color:#38bdf8;margin-right:6px;font-family:monospace;font-size:13px">جاري الجلب...</strong>
+        </div>
+        <button class="btn" style="background:#0284c7;color:#fff;font-size:11px" onclick="copyServerIP()">📋 نسخ IP السيرفر</button>
+      </div>
+
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
         <div>
           <label style="font-size:11px;color:var(--sub);display:block;margin-bottom:3px">API Key:</label>
@@ -502,7 +574,7 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
           <input type="password" id="m-sec" placeholder="MEXC API Secret">
         </div>
       </div>
-      <button class="btn" style="background:var(--primary);color:#fff;width:100%;margin-bottom:12px" onclick="saveKeys()">💾 حفظ وتحديث المفاتيح في SQLite</button>
+      <button class="btn" style="background:var(--primary);color:#fff;width:100%;margin-bottom:12px" onclick="saveKeys()">💾 حفظ المفاتيح (تنظيف تلقائي)</button>
       
       <hr style="border-color:var(--border);margin-bottom:8px">
       <strong style="font-size:12px;display:block;margin-bottom:4px">🔒 تغيير كلمة المرور:</strong>
@@ -722,19 +794,36 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
     </div>
   </div>
 
-  <!-- Logs -->
+  <!-- Live Event Logger & Filter Section -->
   <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-      <strong style="font-size:13px">📜 سجل العمليات الفورية (Live Events):</strong>
-      <button class="btn" style="background:#334155;color:#fff;font-size:11px" onclick="copyLogs()">📋 نسخ السجلات</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px">
+      <strong style="font-size:13px">📜 سجل العمليات والإشارات المباشر:</strong>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="text" id="log-search" placeholder="🔍 بحث في السجل (مثل SOL)..." style="width:160px;padding:3px 8px;font-size:11px" oninput="renderLogs()">
+        <button class="btn" style="background:#334155;color:#fff;font-size:11px" onclick="copyLogs()">📋 نسخ السجلات</button>
+      </div>
     </div>
+
+    <!-- أزرار فلاتر السجلات -->
+    <div class="log-filters">
+      <button class="log-btn active" onclick="setLogFilter('all', this)">الكل</button>
+      <button class="log-btn" onclick="setLogFilter('signals', this)">🎯 الإشارات</button>
+      <button class="log-btn" onclick="setLogFilter('buys', this)">🚀 الشراء</button>
+      <button class="log-btn" onclick="setLogFilter('sells', this)">💰 البيع والأرباح</button>
+      <button class="log-btn" onclick="setLogFilter('orders', this)">📤 أوامر API</button>
+      <button class="log-btn" onclick="setLogFilter('system', this)">⚙️ النظام</button>
+    </div>
+
     <div class="logs" id="logs"></div>
   </div>
 
 <script>
+let rawLogs = [];
 let logsText = "";
+let currentLogFilter = "all";
 let startTs = Date.now();
 let keysLoaded = false;
+let currentPublicIP = "";
 
 function showTab(id, btn){
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
@@ -742,19 +831,34 @@ function showTab(id, btn){
   document.getElementById(id).classList.add('active');
   btn.classList.add('active');
 }
+function setLogFilter(cat, btn){
+  currentLogFilter = cat;
+  document.querySelectorAll('.log-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderLogs();
+}
 function copyLogs(){
   navigator.clipboard.writeText(logsText).then(()=>alert("✅ تم نسخ السجلات إلى الحافظة!"));
+}
+function copyServerIP(){
+  if(currentPublicIP && currentPublicIP !== "جاري الجلب..."){
+    navigator.clipboard.writeText(currentPublicIP).then(()=>alert("✅ تم نسخ عنوان IP السيرفر إلى الحافظة: " + currentPublicIP));
+  } else {
+    alert("لم يتم جلب IP السيرفر بعد");
+  }
 }
 async function setSt(b,s){
   await fetch('/api/control',{method:'POST',body:JSON.stringify({bot_name:b,status:s})});
   update();
 }
 async function saveKeys(){
-  const k = document.getElementById('m-key').value.trim();
-  const s = document.getElementById('m-sec').value.trim();
+  let k = document.getElementById('m-key').value;
+  let s = document.getElementById('m-sec').value;
+  k = k.replace(/\\s+/g, '');
+  s = s.replace(/\\s+/g, '');
   if(!k || !s){ alert("يرجى إدخال المفتاح والسر معاً"); return; }
   await fetch('/api/save_keys',{method:'POST',body:JSON.stringify({api_key:k, api_secret:s})});
-  alert('✅ تم حفظ مفاتيح MEXC في قاعدة البيانات والاتصال المباشر بنجاح!');
+  alert('✅ تم تنظيف وحفظ مفاتيح MEXC في قاعدة البيانات والتحقق المباشر!');
   update();
 }
 async function changePass(){
@@ -799,7 +903,6 @@ async function closeSinglePos(botName, sym, posId){
     update();
   }
 }
-
 async function panicMarket(asset){
   if(confirm(`تسييل كامل رصيد ${asset} فورياً بسعر السوق (Market Order)؟`)){
     const r = await fetch('/api/panic',{method:'POST',body:JSON.stringify({asset:asset, order_type:'MARKET'})});
@@ -808,7 +911,6 @@ async function panicMarket(asset){
     update();
   }
 }
-
 async function panicLimit(asset, curPrice){
   const priceStr = prompt(`أدخل سعر البيع المطلوب لأمر LIMIT لعملة ${asset} (السعر اللحظي الحالي: ${curPrice}$):`, curPrice);
   if(priceStr){
@@ -826,7 +928,6 @@ async function panicLimit(asset, curPrice){
     }
   }
 }
-
 async function convertDust(){
   if(confirm("هل تريد تحويل كافة الأرصدة الصغيرة والغبار في المحفظة إلى عملة MX؟")){
     const r = await fetch('/api/convert_dust', {method:'POST'});
@@ -835,7 +936,6 @@ async function convertDust(){
     update();
   }
 }
-
 async function panicSellAll(){
   if(confirm("⚠️ تحذير: هل أنت متأكد من تسييل وبيع جميع العملات المتاحة دفعة واحدة بسعر السوق إلى USDT؟")){
     const r = await fetch('/api/panic_all', {method:'POST'});
@@ -844,7 +944,6 @@ async function panicSellAll(){
     update();
   }
 }
-
 function updateUptime(){
   const diff = Math.floor((Date.now() - startTs) / 1000);
   const hrs = Math.floor(diff / 3600);
@@ -854,6 +953,47 @@ function updateUptime(){
 }
 setInterval(updateUptime, 1000);
 
+// رسم وتصفية السجلات في الواجهة
+function renderLogs(){
+  const searchQ = (document.getElementById('log-search').value || '').toLowerCase();
+  let lHtml = '';
+  logsText = '';
+
+  const badgeMap = {
+    'signals': {text:'إشارة', bg:'#38bdf822', color:'#38bdf8'},
+    'buys': {text:'شراء', bg:'#3b82f622', color:'#60a5fa'},
+    'sells': {text:'بيع/خروج', bg:'#10b98122', color:'#34d399'},
+    'orders': {text:'API', bg:'#a855f722', color:'#c084fc'},
+    'system': {text:'نظام', bg:'#64748b22', color:'#94a3b8'}
+  };
+
+  rawLogs.forEach(l => {
+    const cat = l.cat || 'system';
+    const msgLower = l.msg.toLowerCase();
+
+    // فلترة التصنيف والبحث
+    if(currentLogFilter !== 'all' && cat !== currentLogFilter) return;
+    if(searchQ && !msgLower.includes(searchQ) && !cat.includes(searchQ)) return;
+
+    const bInfo = badgeMap[cat] || {text:cat, bg:'#334155', color:'#fff'};
+    let typeColor = '#f3f4f6';
+    if(l.type === 'danger') typeColor = 'var(--danger)';
+    else if(l.type === 'success') typeColor = 'var(--success)';
+    else if(l.type === 'warning') typeColor = '#f59e0b';
+    else if(l.type === 'primary') typeColor = '#60a5fa';
+
+    lHtml += `<div class="log-item">
+      <span style="color:var(--sub)">[${l.time}]</span>
+      <span class="log-badge" style="background:${bInfo.bg};color:${bInfo.color}">${bInfo.text}</span>
+      <span style="color:${typeColor}">${l.msg}</span>
+    </div>`;
+
+    logsText += `[${l.time}] [${bInfo.text}] ${l.msg}\\n`;
+  });
+
+  document.getElementById('logs').innerHTML = lHtml || '<div style="color:var(--sub);text-align:center;padding:10px">لا توجد سجلات مطابقة للفلتر</div>';
+}
+
 async function update(){
   try{
     const res = await fetch('/api/data');
@@ -862,6 +1002,11 @@ async function update(){
     
     if(d.start_timestamp) startTs = d.start_timestamp * 1000;
     
+    if(d.server_public_ip){
+      currentPublicIP = d.server_public_ip;
+      document.getElementById('server-ip-val').innerText = d.server_public_ip;
+    }
+
     document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + ' $';
     document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0.0).toFixed(2) + ' $';
     document.getElementById('api-stat').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 MEXC متصل</span>' : '<span style="color:var(--danger)">🔴 API غير متصل</span>';
@@ -965,13 +1110,8 @@ async function update(){
     });
     document.getElementById('w-table').querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أرصدة في المحفظة</td></tr>';
 
-    let lHtml = '';
-    logsText = '';
-    (d.recent_logs||[]).forEach(l=>{
-      lHtml += `<div style="padding:3px 0;border-bottom:1px solid #1f293d44"><span style="color:var(--sub)">[${l.time}]</span> <span>${l.msg}</span></div>`;
-      logsText += `[${l.time}] ${l.msg}\\n`;
-    });
-    document.getElementById('logs').innerHTML = lHtml;
+    rawLogs = d.recent_logs || [];
+    renderLogs();
   }catch(e){}
 }
 setInterval(update, 2000);
@@ -1029,22 +1169,22 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             new_p = data.get("new_password", "").strip()
             if new_p:
                 database.change_password(new_p)
-                add_log("تم تحديث كلمة مرور لوحة التحكم بنجاح", "info")
+                add_log("تم تحديث كلمة مرور لوحة التحكم بنجاح", "system", "info")
                 self.send_response(200); self.end_headers()
             else:
                 self.send_response(400); self.end_headers()
 
         elif self.path == '/api/save_keys':
-            api_k = data.get("api_key", "").strip()
-            api_s = data.get("api_secret", "").strip()
+            api_k = sanitize_str(data.get("api_key", ""))
+            api_s = sanitize_str(data.get("api_secret", ""))
             database.save_keys(api_k, api_s)
             
             ok, acc = mexc_private_request("/api/v3/account")
             if ok:
                 shared_state["api_connected"] = True
-                add_log("✅ تم حفظ وتأكيد اتصال مفاتيح MEXC في قاعدة البيانات", "success")
+                add_log("✅ تم حفظ وتأكيد اتصال مفاتيح MEXC في قاعدة البيانات", "system", "success")
             else:
-                add_log(f"⚠️ تم الحفظ لكن فشل التحقق من API: {acc}", "warning")
+                add_log(f"⚠️ تم الحفظ لكن فشل التحقق من API: {acc}", "system", "warning")
             self.send_response(200); self.end_headers()
 
         elif self.path == '/api/control':
@@ -1052,13 +1192,13 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             st = data.get("status", "RUNNING")
             database.update_bot_config(b_name, {"status": st})
             shared_state["bots"][b_name]["status"] = st
-            add_log(f"تم تغيير حالة {b_name} إلى: {st}", "info")
+            add_log(f"تم تغيير حالة {b_name} إلى: {st}", "system", "info")
             self.send_response(200); self.end_headers()
 
         elif self.path == '/api/save_bot_config':
             b_name = data.pop("bot_name", "BOT_1")
             database.update_bot_config(b_name, data)
-            add_log(f"تم تحديث إعدادات {b_name} في قاعدة البيانات", "info")
+            add_log(f"تم تحديث إعدادات {b_name} في قاعدة البيانات", "system", "info")
             self.send_response(200); self.end_headers()
 
         elif self.path == '/api/manual_buy':
@@ -1075,7 +1215,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                         'id': f"{b_name.lower()}_{int(time.time()*1000)}", 'entry_price': ask, 'highest_price': ask, 'qty': q, 'time': datetime.now(timezone.utc).strftime("%H:%M")
                     })
                     msg = f"✅ تم الشراء الحقيقي لـ {sym} عبر {b_name} عند {ask}$"
-                    add_log(msg, "primary")
+                    add_log(msg, "buys", "primary")
                 else: msg = f"❌ فشل الشراء: {res}"
             else: msg = "فشل قراءة السعر"
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
@@ -1099,7 +1239,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     shared_state["bots"][b_name]["daily_pnl_coins"][sym] += pnl
                     shared_state["bots"][b_name]["trades_count"] += 1
                     if pnl > 0: shared_state["bots"][b_name]["winning_count"] += 1
-                    add_log(f"🔥 تسييل حقيقي لـ {sym} في {b_name} بسعر {cur_price}$ PnL: {pnl:+.3f}$", "danger")
+                    add_log(f"🔥 تسييل حقيقي لـ {sym} في {b_name} بسعر {cur_price}$ | PnL: {pnl:+.3f}$", "sells", "danger")
                 else:
                     new_positions.append(p)
             shared_state["bots"][b_name]["active_positions"][sym] = new_positions
@@ -1120,10 +1260,9 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 ok, res = place_order(sym, "SELL", qty=free_qty, order_type=order_type, price=price)
                 if ok:
                     msg = f"✅ تم تسييل {asset} بأمر {order_type}" + (f" بسعر {price}$" if price else "")
-                    add_log(msg, "danger")
+                    add_log(msg, "sells", "danger")
                 else:
                     msg = f"❌ فشل تنفيذ الأمر: {res}"
-                    add_log(msg, "warning")
             else:
                 msg = "لا يوجد رصيد متاح للتسييل"
 
@@ -1134,10 +1273,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             ok, res = mexc_private_request("/api/v3/capital/convert", method="POST")
             if ok:
                 msg = "✅ تم تحويل الأرصدة الصغيرة بنجاح إلى MX!"
-                add_log(msg, "success")
+                add_log(msg, "system", "success")
             else:
                 msg = f"❌ لم يتم التحويل: {res}"
-                add_log(msg, "warning")
+                add_log(msg, "system", "warning")
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
@@ -1151,7 +1290,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
                     if ok:
                         sold_count += 1
-                        add_log(f"🔥 تسييل جماعي لـ {asset} بنجاح", "danger")
+                        add_log(f"🔥 تسييل جماعي لـ {asset} بنجاح", "sells", "danger")
 
             msg = f"✅ تم إرسال أوامر تسييل لـ {sold_count} عملات إلى USDT" if sold_count > 0 else "لا توجد عملات متاحة للتسييل"
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
@@ -1165,11 +1304,9 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 if __name__ == "__main__":
     print(f"🚀 بدء تشغيل Command Hub على 0.0.0.0:{PORT}", flush=True)
-    # تشغيل محرك التداول في خيط منفصل
     t_engine = threading.Thread(target=trading_engine_loop, daemon=True)
     t_engine.start()
 
-    # ربط خادم الويب على 0.0.0.0 صراحة لضمان استجابة Railway Health Check
     server_address = ("0.0.0.0", PORT)
     httpd = ThreadingHTTPServer(server_address, WebHandler)
     try:
