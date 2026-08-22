@@ -34,12 +34,15 @@ PRECISION_MAP = {
     "ETHUSDT": 4, "BNBUSDT": 3, "XRPUSDT": 1, "ADAUSDT": 1, "LINKUSDT": 2
 }
 
-# =====================================================================
-# 📊 الحالة العامة المشتركة مع دعم كامل للأهداف اليومية والأرباح
-# =====================================================================
+PRICE_PRECISION_MAP = {
+    "NEARUSDT": 4, "AVAXUSDT": 2, "SOLUSDT": 2, "DOGEUSDT": 5, "BTCUSDT": 2,
+    "ETHUSDT": 2, "BNBUSDT": 2, "XRPUSDT": 4, "ADAUSDT": 4, "LINKUSDT": 3
+}
+
 shared_state = {
     "api_connected": False,
     "real_balance_usdt": 0.0,
+    "total_wallet_usd_value": 0.0,
     "wallet_assets": [],
     "market_prices": {sym: {"bid": 0.0, "ask": 0.0} for sym in SYMBOLS},
     "recent_logs": [],
@@ -119,6 +122,10 @@ def format_quantity(symbol, qty):
     truncated = math.floor(qty * factor) / factor
     return f"{int(truncated)}" if prec == 0 else f"{truncated:.{prec}f}"
 
+def format_price(symbol, price):
+    prec = PRICE_PRECISION_MAP.get(symbol, 4)
+    return f"{price:.{prec}f}"
+
 def get_orderbook(symbol):
     try:
         url = f"{BASE_URL}/api/v3/ticker/bookTicker?symbol={symbol}"
@@ -139,18 +146,25 @@ def fetch_klines(symbol, interval="5m", limit=45):
     except Exception:
         return []
 
-def place_order(symbol, side, qty=None, quote_qty=None):
-    params = {"symbol": symbol, "side": side.upper(), "type": "MARKET"}
-    if side.upper() == "BUY" and quote_qty:
-        params["quoteOrderQty"] = f"{quote_qty:.2f}"
-    elif qty:
+def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", price=None):
+    params = {"symbol": symbol, "side": side.upper(), "type": order_type.upper()}
+    if order_type.upper() == "LIMIT":
+        if not price or not qty:
+            return False, "يجب تحديد السعر والكمية لأمر LIMIT"
+        params["timeInForce"] = "GTC"
+        params["price"] = format_price(symbol, price)
         params["quantity"] = format_quantity(symbol, qty)
     else:
-        return False, "تحديد الكمية مطلوب"
+        if side.upper() == "BUY" and quote_qty:
+            params["quoteOrderQty"] = f"{quote_qty:.2f}"
+        elif qty:
+            params["quantity"] = format_quantity(symbol, qty)
+        else:
+            return False, "تحديد الكمية مطلوب"
     return mexc_private_request("/api/v3/order", method="POST", params=params)
 
 # =====================================================================
-# 🤖 محرك التداول الحقيقي + الأهداف اليومية وقفل الأرباح
+# 🤖 محرك التداول الحقيقي وحساب القيمة الفعلية
 # =====================================================================
 def calculate_ewo(candles):
     if len(candles) < 38: return None, None, None
@@ -164,10 +178,10 @@ def calculate_ewo(candles):
     return vals[0], vals[1], vals[2]
 
 def trading_engine_loop():
-    add_log("تم تشغيل محرك التداول الحقيقي ومراقبة الأهداف اليومية", "info")
+    add_log("تم تشغيل محرك التداول المركزي ومراقبة المحفظة", "info")
     while True:
         try:
-            # 1. التصفير التلقائي للأهداف اليومية عند منتصف الليل 00:00 UTC
+            # 1. تصفير الأهداف اليومية 00:00 UTC
             now_day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             if now_day != shared_state["current_day"]:
                 shared_state["current_day"] = now_day
@@ -176,22 +190,44 @@ def trading_engine_loop():
                     shared_state["bots"][bKey]["daily_pnl_coins"] = {sym: 0.0 for sym in SYMBOLS}
                 add_log(f"🌅 بداية يوم تداول جديد ({now_day} UTC) - تصفير الأهداف اليومية", "info")
 
-            # 2. تحديث أرصدة المحفظة الحقيقية
+            # 2. فحص أسعار العملات
+            for sym in SYMBOLS:
+                bid, ask = get_orderbook(sym)
+                if bid and ask:
+                    shared_state["market_prices"][sym] = {"bid": bid, "ask": ask}
+
+            # 3. تحديث أرصدة المحفظة الحقيقية والقيمة بالدولار
             ok, acc = mexc_private_request("/api/v3/account")
             if ok and "balances" in acc:
                 shared_state["api_connected"] = True
                 assets = []
                 usdt_free = 0.0
+                total_val_usd = 0.0
+                
                 for b in acc["balances"]:
                     free = float(b["free"])
                     locked = float(b["locked"])
                     total = free + locked
+                    asset = b["asset"]
+                    
                     if total > 0.0001:
-                        assets.append({"asset": b["asset"], "free": free, "locked": locked, "total": total})
-                    if b["asset"] == "USDT":
+                        usd_price = 1.0 if asset == "USDT" else shared_state["market_prices"].get(f"{asset}USDT", {}).get("bid", 0.0)
+                        val_usd = total * usd_price
+                        total_val_usd += val_usd
+                        assets.append({
+                            "asset": asset,
+                            "free": free,
+                            "locked": locked,
+                            "total": total,
+                            "usd_price": usd_price,
+                            "usd_value": val_usd
+                        })
+                    if asset == "USDT":
                         usdt_free = free
+
                 shared_state["wallet_assets"] = assets
                 shared_state["real_balance_usdt"] = usdt_free
+                shared_state["total_wallet_usd_value"] = total_val_usd
             else:
                 shared_state["api_connected"] = False
 
@@ -203,21 +239,15 @@ def trading_engine_loop():
             shared_state["bots"]["BOT_2"]["status"] = cfg_b2.get("status", "PAUSED")
             shared_state["bots"]["BOT_3"]["status"] = cfg_b3.get("status", "RUNNING")
 
-            # فحص قفل الهدف الإجمالي للبوتات
             b1_target_locked = shared_state["bots"]["BOT_1"]["daily_pnl"] >= shared_state["bots"]["BOT_1"]["daily_target"]
             b2_target_locked = shared_state["bots"]["BOT_2"]["daily_pnl"] >= shared_state["bots"]["BOT_2"]["daily_target"]
 
             for sym in SYMBOLS:
-                bid, ask = get_orderbook(sym)
-                if bid and ask:
-                    shared_state["market_prices"][sym] = {"bid": bid, "ask": ask}
+                bid = shared_state["market_prices"][sym]["bid"]
+                ask = shared_state["market_prices"][sym]["ask"]
+                if not bid: continue
 
-                if not bid:
-                    continue
-
-                # -------------------------------------------------------------
-                # 🤖 Bot 1 (EWO 5m)
-                # -------------------------------------------------------------
+                # --- Bot 1 (EWO 5m) ---
                 if cfg_b1.get("status") != "STOPPED":
                     candles_b1 = fetch_klines(sym, interval="5m", limit=45)
                     if candles_b1:
@@ -242,7 +272,6 @@ def trading_engine_loop():
                                 else: still_b1.append(pos)
                             shared_state["bots"]["BOT_1"]["active_positions"][sym] = still_b1
 
-                            # شروط الدخول مع قفل الأهداف
                             b1_coin_locked = shared_state["bots"]["BOT_1"]["daily_pnl_coins"].get(sym, 0.0) >= shared_state["bots"]["BOT_1"]["daily_coin_target"]
                             can_open = len(still_b1) < 5
                             sig_rebound = (e1 < 0 and e1 > e2 and e2 <= e3)
@@ -258,9 +287,7 @@ def trading_engine_loop():
                                             })
                                             add_log(f"[Bot 1] 🚀 شراء {sym} عند {ask}$ ({len(still_b1)+1}/5)", "primary")
 
-                # -------------------------------------------------------------
-                # ⚡ Bot 2 (EWO Custom TF)
-                # -------------------------------------------------------------
+                # --- Bot 2 (EWO Custom TF) ---
                 if cfg_b2.get("status") != "STOPPED":
                     tf = cfg_b2.get("timeframe", "15m")
                     candles_b2 = fetch_klines(sym, interval=tf, limit=45)
@@ -301,9 +328,7 @@ def trading_engine_loop():
                                             })
                                             add_log(f"[Bot 2 ({tf})] ⚡ شراء {sym} عند {ask}$ ({len(still_b2)+1}/5)", "primary")
 
-                # -------------------------------------------------------------
-                # 🎯 Bot 3 (Manual Trigger + Auto Bracket & Trailing)
-                # -------------------------------------------------------------
+                # --- Bot 3 (Manual Trigger + Auto Bracket & Trailing) ---
                 if cfg_b3.get("status") != "STOPPED":
                     tp_pct = float(cfg_b3.get("tp_pct", 0.015))
                     sl_pct = float(cfg_b3.get("sl_pct", 0.005))
@@ -351,7 +376,7 @@ def trading_engine_loop():
         time.sleep(7)
 
 # =====================================================================
-# 🌐 واجهات HTML الموحدة مع استعادة شريط التقدم والبطاقات الأصلية
+# 🌐 واجهات HTML الموحدة
 # =====================================================================
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -385,7 +410,7 @@ document.getElementById('f').onsubmit=async(e)=>{
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Multi-Bot Live Hub</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Multi-Bot Command Hub</title>
 <style>
 :root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
@@ -416,6 +441,7 @@ details{background:var(--card);border:1px solid var(--border);border-radius:12px
 summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
 .form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;padding:10px}
 .badge-live{background:#10b98122;color:#10b981;border:1px solid #10b98144;padding:2px 6px;border-radius:4px;font-size:11px}
+.action-cell{display:flex;gap:4px;align-items:center}
 </style>
 </head>
 <body>
@@ -429,8 +455,8 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
     </div>
     <div style="display:flex;align-items:center;gap:10px">
       <div class="wallet-bar">
-        <span style="font-size:12px;color:var(--sub)">رصيد USDT المتاح:</span>
-        <strong id="live-usdt" style="color:#10b981;font-size:16px">0.00 $</strong>
+        <div><span style="font-size:11px;color:var(--sub)">USDT المتاح:</span> <strong id="live-usdt" style="color:#10b981;font-size:15px">0.00 $</strong></div>
+        <div style="border-right:1px solid var(--border);padding-right:10px"><span style="font-size:11px;color:var(--sub)">إجمالي المحفظة:</span> <strong id="live-total-usd" style="color:#38bdf8;font-size:15px">0.00 $</strong></div>
       </div>
       <span id="api-stat" style="font-size:12px">جاري الفحص...</span>
       <button class="btn" style="background:#334155;color:#fff" onclick="fetch('/api/logout').then(()=>location.href='/login')">🚪 خروج</button>
@@ -474,7 +500,6 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
       </div>
     </div>
     
-    <!-- بطاقات الإحصائيات مع شريط التقدم للهدف اليومي والسيولة المحجوزة -->
     <div class="grid">
       <div class="card">
         <div class="card-title">أرباح اليوم المحققة</div>
@@ -506,7 +531,6 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
       </div>
     </details>
 
-    <!-- جدول العملات الـ 10 مع أرباح كل عملة وشارات الصفقات المفتوحة ( count/5 ) وشراء فوري -->
     <div class="card">
       <strong style="font-size:13px;display:block;margin-bottom:6px">📊 حالة العملات العشر، أرباح اليوم، والشراء السريع:</strong>
       <div style="overflow-x:auto">
@@ -642,11 +666,25 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
     </div>
   </div>
 
-  <!-- Wallet -->
+  <!-- Wallet & Panic Orders -->
   <div id="t4" class="tab-pane">
     <div class="card">
-      <strong style="font-size:13px;display:block;margin-bottom:8px">💼 أرصدة المحفظة الحية في حساب MEXC:</strong>
-      <div style="overflow-x:auto"><table id="w-table"><thead><tr><th>العملة</th><th>المتاح (Free)</th><th>المحجوز (Locked)</th><th>الإجمالي</th><th>إجراء تسييل</th></tr></thead><tbody></tbody></table></div>
+      <strong style="font-size:13px;display:block;margin-bottom:8px">💼 أرصدة المحفظة الحية والقيمة الفعلية بالدولار:</strong>
+      <div style="overflow-x:auto">
+        <table id="w-table">
+          <thead>
+            <tr>
+              <th>العملة</th>
+              <th>المتاح (Free)</th>
+              <th>المحجوز (Locked)</th>
+              <th>السعر اللحظي</th>
+              <th>القيمة الفعلية ($)</th>
+              <th>إجراء التسييل</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -699,9 +737,9 @@ async function saveBotCfg(botName, prefix){
     payload.timeframe = document.getElementById('b2-tf').value;
   }
   if(prefix==='b3'){
-    payload.tp_pct = (parseFloat(document.getElementById(prefix+'-tp').value)||1.5) / 100.0;
-    payload.sl_pct = (parseFloat(document.getElementById(prefix+'-sl').value)||0.5) / 100.0;
-    payload.trailing_stop = parseInt(document.getElementById(prefix+'-ts').value);
+    payload.tp_pct = (parseFloat(document.getElementById('b3-tp').value)||1.5) / 100.0;
+    payload.sl_pct = (parseFloat(document.getElementById('b3-sl').value)||0.5) / 100.0;
+    payload.trailing_stop = parseInt(document.getElementById('b3-ts').value);
   }
   await fetch('/api/save_bot_config', {method:'POST', body:JSON.stringify(payload)});
   alert(`✅ تم حفظ إعدادات ${botName} بنجاح!`);
@@ -723,14 +761,36 @@ async function closeSinglePos(botName, sym, posId){
     update();
   }
 }
-async function panic(asset){
-  if(confirm(`تسييل كامل رصيد ${asset} فورياً بسعر السوق؟`)){
-    const r = await fetch('/api/panic',{method:'POST',body:JSON.stringify({asset:asset})});
+
+// تسييل بسعر السوق
+async function panicMarket(asset){
+  if(confirm(`تسييل كامل رصيد ${asset} فورياً بسعر السوق (Market Order)؟`)){
+    const r = await fetch('/api/panic',{method:'POST',body:JSON.stringify({asset:asset, order_type:'MARKET'})});
     const d = await r.json();
     alert(d.msg);
     update();
   }
 }
+
+// تسييل بأمر معلق محدد السعر
+async function panicLimit(asset, curPrice){
+  const priceStr = prompt(`أدخل سعر البيع المطلوب لأمر LIMIT لعملة ${asset} (السعر اللحظي الحالي: ${curPrice}$):`, curPrice);
+  if(priceStr){
+    const limitPrice = parseFloat(priceStr);
+    if(limitPrice > 0){
+      const r = await fetch('/api/panic', {
+        method:'POST',
+        body:JSON.stringify({asset:asset, order_type:'LIMIT', price:limitPrice})
+      });
+      const d = await r.json();
+      alert(d.msg);
+      update();
+    } else {
+      alert("يرجى إدخال سعر صحيح");
+    }
+  }
+}
+
 function updateUptime(){
   const diff = Math.floor((Date.now() - startTs) / 1000);
   const hrs = Math.floor(diff / 3600);
@@ -749,6 +809,7 @@ async function update(){
     if(d.start_timestamp) startTs = d.start_timestamp * 1000;
     
     document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + ' $';
+    document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0.0).toFixed(2) + ' $';
     document.getElementById('api-stat').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 MEXC متصل</span>' : '<span style="color:var(--danger)">🔴 API غير متصل</span>';
 
     // تحديث بيانات وإحصائيات البوتات الثلاثة
@@ -760,7 +821,6 @@ async function update(){
       stEl.innerText = bObj.status || 'RUNNING';
       stEl.style.color = bObj.status === 'RUNNING' ? '#10b981' : (bObj.status === 'PAUSED' ? '#f59e0b' : '#ef4444');
 
-      // 1. الأرباح وشريط التقدم
       const pnl = bObj.daily_pnl || 0.0;
       const pnlEl = document.getElementById(pfx+'-pnl');
       pnlEl.innerText = (pnl >= 0 ? '+' : '') + pnl.toFixed(3) + '$';
@@ -770,14 +830,12 @@ async function update(){
       document.getElementById(pfx+'-pnl-bar').style.width = pct + '%';
       document.getElementById(pfx+'-pnl-pct').innerText = pct.toFixed(0) + '%';
 
-      // 2. نسبة الفوز
       const totalT = bObj.trades_count || 0;
       const winT = bObj.winning_count || 0;
       const wr = totalT > 0 ? ((winT / totalT) * 100).toFixed(1) : '0.0';
       document.getElementById(pfx+'-winrate').innerText = wr + '%';
       document.getElementById(pfx+'-trade-stats').innerText = `${totalT} صفقة (${winT} رابحة)`;
 
-      // 3. جدول العملات والسيولة المحجوزة
       let totalOpen = 0;
       let coinsTableHtml = '';
       for(const sym of Object.keys(bObj.active_positions)){
@@ -801,7 +859,6 @@ async function update(){
       document.getElementById(pfx+'-open-count').innerText = totalOpen + ' صفقات';
       document.getElementById(pfx+'-cap-used').innerText = (totalOpen * 10) + '$ محجوزة في السوق';
 
-      // 4. جدول الصفقات المفتوحة
       let posHtml = '';
       for(let s in bObj.active_positions){
         (bObj.active_positions[s] || []).forEach(p=>{
@@ -813,7 +870,6 @@ async function update(){
       document.getElementById(pfx+'-orders').querySelector('tbody').innerHTML = posHtml || `<tr><td colspan="${colSpan}" style="text-align:center;color:var(--sub)">لا توجد صفقات مفتوحة</td></tr>`;
     });
 
-    // Bot 3 Market Trigger Table
     let b3MHtml = '';
     for(let sym of Object.keys(d.market_prices)){
       const p = d.market_prices[sym];
@@ -821,15 +877,31 @@ async function update(){
     }
     document.getElementById('b3-market-table').querySelector('tbody').innerHTML = b3MHtml;
 
-    // Wallet
+    // جدول المحفظة مع القيمة الفعلية وخياري التسييل (سوق / أمر ليميت)
     let wHtml = '';
     (d.wallet_assets||[]).forEach(a=>{
-      const canSell = a.asset!=='USDT' && a.free>0;
-      wHtml += `<tr><td><strong>${a.asset}</strong></td><td>${a.free}</td><td>${a.locked}</td><td>${a.total}</td><td>${canSell?`<button class="btn" style="background:var(--danger);color:#fff;padding:2px 6px" onclick="panic('${a.asset}')">🔥 تسييل</button>`:'-'}</td></tr>`;
+      const canSell = a.asset !== 'USDT' && a.free > 0;
+      const priceStr = a.asset === 'USDT' ? '1.00 $' : (a.usd_price > 0 ? a.usd_price.toFixed(4) + ' $' : '-');
+      const valStr = a.usd_value > 0 ? a.usd_value.toFixed(2) + ' $' : '0.00 $';
+      
+      wHtml += `<tr>
+        <td><strong>${a.asset}</strong></td>
+        <td>${a.free}</td>
+        <td>${a.locked}</td>
+        <td>${priceStr}</td>
+        <td style="color:#38bdf8;font-weight:bold">${valStr}</td>
+        <td>
+          ${canSell ? `
+            <div class="action-cell">
+              <button class="btn" style="background:var(--danger);color:#fff;padding:2px 6px" onclick="panicMarket('${a.asset}')">🔥 سوق</button>
+              <button class="btn" style="background:#f59e0b;color:#000;padding:2px 6px" onclick="panicLimit('${a.asset}', ${a.usd_price})">📝 أمر ليميت</button>
+            </div>
+          ` : '-'}
+        </td>
+      </tr>`;
     });
-    document.getElementById('w-table').querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="5" style="text-align:center;color:var(--sub)">لا توجد أرصدة ظاهرة</td></tr>';
+    document.getElementById('w-table').querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أرصدة ظاهرة</td></tr>';
 
-    // Logs
     let lHtml = '';
     logsText = '';
     (d.recent_logs||[]).forEach(l=>{
@@ -965,15 +1037,25 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == '/api/panic':
             asset = data.get("asset")
+            order_type = data.get("order_type", "MARKET")
+            price = data.get("price")
             free_qty = 0.0
+            
             for a in shared_state.get("wallet_assets", []):
                 if a["asset"] == asset: free_qty = float(a["free"]); break
+                
             if free_qty > 0:
-                ok, res = place_order(f"{asset}USDT", "SELL", qty=free_qty)
-                msg = f"✅ تم تسييل {asset} بنجاح" if ok else f"❌ فشل التسييل: {res}"
-                add_log(f"تسييل {asset}: {msg}", "danger")
+                sym = f"{asset}USDT"
+                ok, res = place_order(sym, "SELL", qty=free_qty, order_type=order_type, price=price)
+                if ok:
+                    msg = f"✅ تم تسييل {asset} بأمر {order_type}" + (f" بسعر {price}$" if price else "")
+                    add_log(msg, "danger")
+                else:
+                    msg = f"❌ فشل تنفيذ الأمر: {res}"
+                    add_log(msg, "warning")
             else:
                 msg = "لا يوجد رصيد متاح للتسييل"
+                
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
