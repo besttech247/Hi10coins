@@ -41,6 +41,8 @@ PRICE_PRECISION_MAP = {
 
 shared_state = {
     "api_connected": False,
+    "has_saved_keys": False,
+    "masked_key": "",
     "real_balance_usdt": 0.0,
     "total_wallet_usd_value": 0.0,
     "wallet_assets": [],
@@ -99,9 +101,17 @@ def sign_query(query_string, secret):
 
 def mexc_private_request(endpoint, method="GET", params=None):
     keys = database.get_keys()
-    api_key, api_secret = keys.get("api_key", ""), keys.get("api_secret", "")
+    api_key = keys.get("api_key", "").strip()
+    api_secret = keys.get("api_secret", "").strip()
+    
     if not api_key or not api_secret:
+        shared_state["has_saved_keys"] = False
+        shared_state["masked_key"] = ""
         return False, "مفاتيح API مفقودة"
+
+    shared_state["has_saved_keys"] = True
+    shared_state["masked_key"] = api_key[:4] + "..." + api_key[-4:] if len(api_key) > 8 else "****"
+
     if params is None:
         params = {}
     params["timestamp"] = int(time.time() * 1000)
@@ -181,7 +191,6 @@ def trading_engine_loop():
     add_log("تم تشغيل محرك التداول المركزي ومراقبة المحفظة", "info")
     while True:
         try:
-            # 1. تصفير الأهداف اليومية 00:00 UTC
             now_day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             if now_day != shared_state["current_day"]:
                 shared_state["current_day"] = now_day
@@ -190,13 +199,11 @@ def trading_engine_loop():
                     shared_state["bots"][bKey]["daily_pnl_coins"] = {sym: 0.0 for sym in SYMBOLS}
                 add_log(f"🌅 بداية يوم تداول جديد ({now_day} UTC) - تصفير الأهداف اليومية", "info")
 
-            # 2. تحديث أسعار السوق
             for sym in SYMBOLS:
                 bid, ask = get_orderbook(sym)
                 if bid and ask:
                     shared_state["market_prices"][sym] = {"bid": bid, "ask": ask}
 
-            # 3. جلب كافة أرصدة المحفظة دون استثناء وحساب قيمتها
             ok, acc = mexc_private_request("/api/v3/account")
             if ok and "balances" in acc:
                 shared_state["api_connected"] = True
@@ -210,7 +217,6 @@ def trading_engine_loop():
                     total = free + locked
                     asset = b["asset"]
                     
-                    # عرض أي عملة فيها رصيد موجب
                     if total > 0.0:
                         usd_price = 1.0 if asset == "USDT" else shared_state["market_prices"].get(f"{asset}USDT", {}).get("bid", 0.0)
                         val_usd = total * usd_price
@@ -248,7 +254,7 @@ def trading_engine_loop():
                 ask = shared_state["market_prices"][sym]["ask"]
                 if not bid: continue
 
-                # --- Bot 1 (EWO 5m) ---
+                # Bot 1
                 if cfg_b1.get("status") != "STOPPED":
                     candles_b1 = fetch_klines(sym, interval="5m", limit=45)
                     if candles_b1:
@@ -288,7 +294,7 @@ def trading_engine_loop():
                                             })
                                             add_log(f"[Bot 1] 🚀 شراء {sym} عند {ask}$ ({len(still_b1)+1}/5)", "primary")
 
-                # --- Bot 2 (EWO Custom TF) ---
+                # Bot 2
                 if cfg_b2.get("status") != "STOPPED":
                     tf = cfg_b2.get("timeframe", "15m")
                     candles_b2 = fetch_klines(sym, interval=tf, limit=45)
@@ -329,7 +335,7 @@ def trading_engine_loop():
                                             })
                                             add_log(f"[Bot 2 ({tf})] ⚡ شراء {sym} عند {ask}$ ({len(still_b2)+1}/5)", "primary")
 
-                # --- Bot 3 (Manual Trigger + Bracket) ---
+                # Bot 3
                 if cfg_b3.get("status") != "STOPPED":
                     tp_pct = float(cfg_b3.get("tp_pct", 0.015))
                     sl_pct = float(cfg_b3.get("sl_pct", 0.005))
@@ -465,14 +471,20 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
   </div>
 
   <!-- مفاتيح المنصة وكلمة المرور -->
-  <details>
-    <summary style="color:#60a5fa">🔑 إعدادات MEXC API وكلمة المرور ▾</summary>
+  <details id="keys-box">
+    <summary style="color:#60a5fa">🔑 إعدادات MEXC API وكلمة المرور ▾ <span id="keys-status-badge" style="font-size:11px;color:var(--sub)"></span></summary>
     <div style="padding:10px">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
-        <input type="password" id="m-key" placeholder="MEXC API Key">
-        <input type="password" id="m-sec" placeholder="MEXC API Secret">
+        <div>
+          <label style="font-size:11px;color:var(--sub);display:block;margin-bottom:3px">API Key:</label>
+          <input type="password" id="m-key" placeholder="MEXC API Key">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--sub);display:block;margin-bottom:3px">API Secret:</label>
+          <input type="password" id="m-sec" placeholder="MEXC API Secret">
+        </div>
       </div>
-      <button class="btn" style="background:var(--primary);color:#fff;width:100%;margin-bottom:12px" onclick="saveKeys()">💾 حفظ المفاتيح</button>
+      <button class="btn" style="background:var(--primary);color:#fff;width:100%;margin-bottom:12px" onclick="saveKeys()">💾 حفظ وتحديث المفاتيح في SQLite</button>
       
       <hr style="border-color:var(--border);margin-bottom:8px">
       <strong style="font-size:12px;display:block;margin-bottom:4px">🔒 تغيير كلمة المرور:</strong>
@@ -522,7 +534,6 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
       </div>
     </div>
 
-    <!-- إعدادات Bot 1 -->
     <details>
       <summary style="color:#a78bfa">⚙️ تخصيص حجم الصفقة ونسبة الوقف (Bot 1) ▾</summary>
       <div class="form-row">
@@ -579,7 +590,6 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
       </div>
     </div>
 
-    <!-- إعدادات Bot 2 -->
     <details>
       <summary style="color:#a78bfa">⚙️ تخصيص الفريم الزمني والصفقة (Bot 2) ▾</summary>
       <div class="form-row">
@@ -641,7 +651,6 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
       </div>
     </div>
 
-    <!-- إعدادات Bot 3 -->
     <details open>
       <summary style="color:#38bdf8">🎯 إعدادات جني الأرباح ووقف الخسارة التلقائي والـ Trailing Stop ▾</summary>
       <div class="form-row">
@@ -707,6 +716,7 @@ summary{padding:10px;cursor:pointer;font-weight:bold;background:#151e30}
 <script>
 let logsText = "";
 let startTs = Date.now();
+let keysLoaded = false;
 
 function showTab(id, btn){
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
@@ -722,8 +732,11 @@ async function setSt(b,s){
   update();
 }
 async function saveKeys(){
-  await fetch('/api/save_keys',{method:'POST',body:JSON.stringify({api_key:document.getElementById('m-key').value,api_secret:document.getElementById('m-sec').value})});
-  alert('✅ تم حفظ مفاتيح MEXC بنجاح!');
+  const k = document.getElementById('m-key').value.trim();
+  const s = document.getElementById('m-sec').value.trim();
+  if(!k || !s){ alert("يرجى إدخال المفتاح والسر معاً"); return; }
+  await fetch('/api/save_keys',{method:'POST',body:JSON.stringify({api_key:k, api_secret:s})});
+  alert('✅ تم حفظ مفاتيح MEXC في قاعدة البيانات والاتصال المباشر بنجاح!');
   update();
 }
 async function changePass(){
@@ -768,8 +781,6 @@ async function closeSinglePos(botName, sym, posId){
     update();
   }
 }
-
-// تسييل فردي بسعر السوق
 async function panicMarket(asset){
   if(confirm(`تسييل كامل رصيد ${asset} فورياً بسعر السوق (Market Order)؟`)){
     const r = await fetch('/api/panic',{method:'POST',body:JSON.stringify({asset:asset, order_type:'MARKET'})});
@@ -778,8 +789,6 @@ async function panicMarket(asset){
     update();
   }
 }
-
-// تسييل فردي بأمر ليميت
 async function panicLimit(asset, curPrice){
   const priceStr = prompt(`أدخل سعر البيع المطلوب لأمر LIMIT لعملة ${asset} (السعر اللحظي الحالي: ${curPrice}$):`, curPrice);
   if(priceStr){
@@ -797,8 +806,6 @@ async function panicLimit(asset, curPrice){
     }
   }
 }
-
-// تحويل الأرصدة الصغيرة إلى MX
 async function convertDust(){
   if(confirm("هل تريد تحويل كافة الأرصدة الصغيرة والغبار في المحفظة إلى عملة MX؟")){
     const r = await fetch('/api/convert_dust', {method:'POST'});
@@ -807,8 +814,6 @@ async function convertDust(){
     update();
   }
 }
-
-// تسييل كل العملات دفعة واحدة إلى USDT
 async function panicSellAll(){
   if(confirm("⚠️ تحذير: هل أنت متأكد من تسييل وبيع جميع العملات المتاحة دفعة واحدة بسعر السوق إلى USDT؟")){
     const r = await fetch('/api/panic_all', {method:'POST'});
@@ -817,7 +822,6 @@ async function panicSellAll(){
     update();
   }
 }
-
 function updateUptime(){
   const diff = Math.floor((Date.now() - startTs) / 1000);
   const hrs = Math.floor(diff / 3600);
@@ -838,6 +842,18 @@ async function update(){
     document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + ' $';
     document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0.0).toFixed(2) + ' $';
     document.getElementById('api-stat').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 MEXC متصل</span>' : '<span style="color:var(--danger)">🔴 API غير متصل</span>';
+
+    // تحديث شارة المفاتيح المحفوظة تلقائياً
+    if(d.has_saved_keys){
+      document.getElementById('keys-status-badge').innerHTML = `<span style="color:var(--success);font-weight:bold">(مربوط: ${d.masked_key})</span>`;
+      if(!keysLoaded){
+        document.getElementById('m-key').placeholder = `المفتاح محفوظ (${d.masked_key})`;
+        document.getElementById('m-sec').placeholder = "السر محفوظ (*********)";
+        keysLoaded = true;
+      }
+    } else {
+      document.getElementById('keys-status-badge').innerHTML = `<span style="color:var(--danger);font-weight:bold">(غير مربوط)</span>`;
+    }
 
     // تحديث بيانات وإحصائيات البوتات الثلاثة
     ['BOT_1', 'BOT_2', 'BOT_3'].forEach(bKey => {
@@ -904,7 +920,7 @@ async function update(){
     }
     document.getElementById('b3-market-table').querySelector('tbody').innerHTML = b3MHtml;
 
-    // جدول المحفظة الشاملة لكافة العملات
+    // جدول المحفظة
     let wHtml = '';
     (d.wallet_assets||[]).forEach(a=>{
       const canSell = a.asset !== 'USDT' && a.free > 0;
@@ -945,7 +961,7 @@ update();
 </html>"""
 
 # =====================================================================
-# 🛡️ خادم الويب ومعالجة مسارات التسييل والتحويل
+# 🛡️ خادم الويب ومعالجة الطلبات
 # =====================================================================
 class WebHandler(http.server.BaseHTTPRequestHandler):
     def is_auth(self):
@@ -999,8 +1015,17 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(400); self.end_headers()
 
         elif self.path == '/api/save_keys':
-            database.save_keys(data.get("api_key", ""), data.get("api_secret", ""))
-            add_log("تم تحديث مفاتيح MEXC في قاعدة البيانات", "info")
+            api_k = data.get("api_key", "").strip()
+            api_s = data.get("api_secret", "").strip()
+            database.save_keys(api_k, api_s)
+            
+            # فحص فوري للمفاتيح للتأكد من الربط المباشر
+            ok, acc = mexc_private_request("/api/v3/account")
+            if ok:
+                shared_state["api_connected"] = True
+                add_log("✅ تم حفظ وتأكيد اتصال مفاتيح MEXC في قاعدة البيانات", "success")
+            else:
+                add_log(f"⚠️ تم الحفظ لكن فشل التحقق من API: {acc}", "warning")
             self.send_response(200); self.end_headers()
 
         elif self.path == '/api/control':
@@ -1062,7 +1087,6 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": "✅ تم تسييل الصفقة بأمر بيع فوري في المنصة"}, ensure_ascii=False).encode('utf-8'))
 
-        # تسييل فردي (سوق أو ليميت)
         elif self.path == '/api/panic':
             asset = data.get("asset")
             order_type = data.get("order_type", "MARKET")
@@ -1087,7 +1111,6 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
-        # تحويل الأرصدة الصغيرة (Dust to MX)
         elif self.path == '/api/convert_dust':
             ok, res = mexc_private_request("/api/v3/capital/convert", method="POST")
             if ok:
@@ -1099,7 +1122,6 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
-        # تسييل كل العملات دفعة واحدة إلى USDT
         elif self.path == '/api/panic_all':
             sold_count = 0
             for a in shared_state.get("wallet_assets", []):
