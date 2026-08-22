@@ -45,6 +45,9 @@ shared_state = {
             "symbols": [],
             "max_allocation": 100.0,
             "max_concurrent": 3,
+            "trade_size": 10.0,
+            "sl_pct": 0.49,
+            "timeframe": "5m",
             "daily_pnl": 0.0,
             "daily_target": 5.0,
             "daily_coin_target": 1.5,
@@ -59,6 +62,9 @@ shared_state = {
             "symbols": [],
             "max_allocation": 100.0,
             "max_concurrent": 3,
+            "trade_size": 10.0,
+            "sl_pct": 0.6,
+            "timeframe": "15m",
             "daily_pnl": 0.0,
             "daily_target": 5.0,
             "daily_coin_target": 1.5,
@@ -73,6 +79,10 @@ shared_state = {
             "symbols": [],
             "max_allocation": 100.0,
             "max_concurrent": 3,
+            "trade_size": 10.0,
+            "tp_pct": 1.5,
+            "sl_pct": 0.5,
+            "trailing_stop": 1,
             "daily_pnl": 0.0,
             "daily_target": 5.0,
             "daily_coin_target": 1.5,
@@ -269,7 +279,15 @@ def trading_engine_loop():
                 shared_state["bots"][bKey]["status"] = cfg.get("status", "RUNNING")
                 shared_state["bots"][bKey]["max_allocation"] = float(cfg.get("max_allocation_usdt", 100.0))
                 shared_state["bots"][bKey]["max_concurrent"] = int(cfg.get("max_concurrent_per_coin", 3))
+                shared_state["bots"][bKey]["trade_size"] = float(cfg.get("trade_size_usdt", 10.0))
+                shared_state["bots"][bKey]["sl_pct"] = float(cfg.get("sl_pct", 0.005)) * 100.0
                 
+                if bKey == "BOT_2":
+                    shared_state["bots"][bKey]["timeframe"] = cfg.get("timeframe", "15m")
+                elif bKey == "BOT_3":
+                    shared_state["bots"][bKey]["tp_pct"] = float(cfg.get("tp_pct", 0.015)) * 100.0
+                    shared_state["bots"][bKey]["trailing_stop"] = int(cfg.get("trailing_stop", 1))
+
                 for s in syms:
                     all_active_symbols.add(s)
                     if s not in shared_state["bots"][bKey]["active_positions"]:
@@ -330,10 +348,10 @@ def trading_engine_loop():
                         if candles:
                             e3, e2, e1 = calculate_ewo(candles)
                             if e1 is not None:
-                                sl_pct = float(cfg.get("sl_pct", 0.005))
+                                sl_pct_val = float(cfg.get("sl_pct", 0.005))
                                 still_pos = []
                                 for pos in shared_state["bots"][bKey]["active_positions"].get(sym, []):
-                                    sl = pos['entry_price'] * (1.0 - sl_pct)
+                                    sl = pos['entry_price'] * (1.0 - sl_pct_val)
                                     hit_sl = bid <= sl
                                     hit_rev = (e2 > 0) and (e1 < e2)
                                     if hit_sl or hit_rev:
@@ -369,8 +387,8 @@ def trading_engine_loop():
 
                     # Bot 3
                     elif bKey == "BOT_3":
-                        tp_pct = float(cfg.get("tp_pct", 0.015))
-                        sl_pct = float(cfg.get("sl_pct", 0.005))
+                        tp_pct_val = float(cfg.get("tp_pct", 0.015))
+                        sl_pct_val = float(cfg.get("sl_pct", 0.005))
                         use_ts = bool(cfg.get("trailing_stop", 1))
                         cb_pct = float(cfg.get("trailing_cb", 0.003))
 
@@ -382,8 +400,8 @@ def trading_engine_loop():
                                 highest = bid
                                 pos['highest_price'] = highest
 
-                            tp_price = entry * (1.0 + tp_pct)
-                            sl_price = entry * (1.0 - sl_pct)
+                            tp_price = entry * (1.0 + tp_pct_val)
+                            sl_price = entry * (1.0 - sl_pct_val)
                             trailing_sl = highest * (1.0 - cb_pct) if use_ts else sl_price
                             effective_sl = max(sl_price, trailing_sl) if use_ts and highest >= (entry * (1.0 + cb_pct)) else sl_price
 
@@ -518,6 +536,7 @@ summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
     </div>
   </div>
 
+  <!-- مفاتيح المنصة وكلمة المرور -->
   <details id="keys-box">
     <summary style="color:#60a5fa">🔑 الإعدادات و IP السيرفر ▾ <span id="keys-status-badge"></span></summary>
     <div style="padding:10px">
@@ -687,6 +706,7 @@ summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
     <details open>
       <summary style="color:#38bdf8">🎯 إعدادات الدخول اليدوي والـ Trailing Stop ▾</summary>
       <div class="form-row">
+        <div><label style="font-size:11px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="b3-alloc" value="100"></div>
         <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="b3-size" value="10"></div>
         <div><label style="font-size:11px;color:var(--sub)">جني الأرباح (TP %)</label><input type="number" id="b3-tp" value="1.5" step="0.1"></div>
         <div><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="b3-sl" value="0.5" step="0.1"></div>
@@ -757,6 +777,7 @@ let currentLogFilter = "all";
 let startTs = Date.now();
 let keysLoaded = false;
 let currentPublicIP = "";
+let initialConfigsPopulated = false;
 
 function showTab(id, btn){
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
@@ -795,7 +816,6 @@ async function changePass(){
   if(res.ok){ alert("✅ تم التغيير!"); document.getElementById('new-pass').value = ''; }
 }
 
-// دالة إضافة عملة جديدة للبوت
 async function addCoinToBot(botName){
   const coin = prompt(`أدخل رمز العملة المراد إضافتها لـ ${botName} (مثال: SOL أو SUI أو NEAR):`);
   if(coin && coin.trim()){
@@ -809,7 +829,6 @@ async function addCoinToBot(botName){
   }
 }
 
-// دالة حذف عملة مع رسالة تأكيد
 async function removeCoinFromBot(botName, sym){
   if(confirm(`⚠️ هل أنت متأكد من حذف العملة (${sym}) من قائمة تداول ${botName}؟`)){
     const r = await fetch('/api/remove_symbol', {
@@ -826,10 +845,10 @@ async function saveBotCfg(botName, prefix){
   const payload = {
     bot_name: botName,
     max_allocation_usdt: parseFloat(document.getElementById(prefix+'-alloc').value)||100,
-    max_concurrent_per_coin: parseInt(document.getElementById(prefix+'-maxcon').value)||3,
     trade_size_usdt: parseFloat(document.getElementById(prefix+'-size').value)||10
   };
   if(prefix==='b1' || prefix==='b2'){
+    payload.max_concurrent_per_coin = parseInt(document.getElementById(prefix+'-maxcon').value)||3;
     payload.sl_pct = (parseFloat(document.getElementById(prefix+'-sl').value)||0.5) / 100.0;
   }
   if(prefix==='b2'){
@@ -841,7 +860,7 @@ async function saveBotCfg(botName, prefix){
     payload.trailing_stop = parseInt(document.getElementById('b3-ts').value);
   }
   await fetch('/api/save_bot_config', {method:'POST', body:JSON.stringify(payload)});
-  alert(`✅ تم حفظ إعدادات ${botName}!`);
+  alert(`✅ تم حفظ إعدادات ${botName} في قاعدة البيانات!`);
   update();
 }
 async function triggerBuy(botName, sym){
@@ -953,6 +972,24 @@ async function update(){
       }
     }
 
+    // تعبئة حقول الإعدادات المحفوظة عند فتح الصفحة لأول مرة
+    if(!initialConfigsPopulated && d.bots){
+      ['BOT_1', 'BOT_2', 'BOT_3'].forEach(bKey => {
+        const pfx = bKey === 'BOT_1' ? 'b1' : (bKey === 'BOT_2' ? 'b2' : 'b3');
+        const b = d.bots[bKey];
+        if(b){
+          if(document.getElementById(pfx+'-alloc') && b.max_allocation) document.getElementById(pfx+'-alloc').value = b.max_allocation;
+          if(document.getElementById(pfx+'-size') && b.trade_size) document.getElementById(pfx+'-size').value = b.trade_size;
+          if(document.getElementById(pfx+'-maxcon') && b.max_concurrent) document.getElementById(pfx+'-maxcon').value = b.max_concurrent;
+          if(document.getElementById(pfx+'-sl') && b.sl_pct !== undefined) document.getElementById(pfx+'-sl').value = b.sl_pct;
+          if(document.getElementById(pfx+'-tf') && b.timeframe) document.getElementById(pfx+'-tf').value = b.timeframe;
+          if(document.getElementById(pfx+'-tp') && b.tp_pct !== undefined) document.getElementById(pfx+'-tp').value = b.tp_pct;
+          if(document.getElementById(pfx+'-ts') && b.trailing_stop !== undefined) document.getElementById(pfx+'-ts').value = b.trailing_stop;
+        }
+      });
+      initialConfigsPopulated = true;
+    }
+
     ['BOT_1', 'BOT_2', 'BOT_3'].forEach(bKey => {
       const pfx = bKey === 'BOT_1' ? 'b1' : (bKey === 'BOT_2' ? 'b2' : 'b3');
       const bObj = d.bots[bKey];
@@ -975,7 +1012,6 @@ async function update(){
       document.getElementById(pfx+'-winrate').innerText = wr + '%';
       document.getElementById(pfx+'-trade-stats').innerText = `${totalT} صفقات (${winT} رابحة)`;
 
-      // جدول العملات الخاص بالبوت مع زر الحذف المنفصل
       let totalOpen = 0;
       let coinsTableHtml = '';
       (bObj.symbols || []).forEach(sym => {
@@ -998,11 +1034,10 @@ async function update(){
         document.getElementById(pfx+'-coins-table').querySelector('tbody').innerHTML = coinsTableHtml || '<tr><td colspan="6" style="text-align:center">لا توجد عملات مضافة حالياً</td></tr>';
       }
       
-      const usedUsd = totalOpen * (parseFloat(document.getElementById(pfx+'-size').value)||10);
+      const usedUsd = totalOpen * (bObj.trade_size || 10);
       document.getElementById(pfx+'-cap-used').innerText = usedUsd.toFixed(1) + '$';
       document.getElementById(pfx+'-alloc-text').innerText = `سقف: ${bObj.max_allocation}$`;
 
-      // الصفقات المفتوحة
       let posHtml = '';
       for(let s in bObj.active_positions){
         (bObj.active_positions[s] || []).forEach(p=>{
@@ -1014,7 +1049,6 @@ async function update(){
       document.getElementById(pfx+'-orders').querySelector('tbody').innerHTML = posHtml || `<tr><td colspan="${colSpan}" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>`;
     });
 
-    // Bot 3 Market Trigger Table
     let b3MHtml = '';
     (d.bots["BOT_3"].symbols || []).forEach(sym => {
       const p = d.market_prices[sym];
@@ -1028,7 +1062,6 @@ async function update(){
     });
     document.getElementById('b3-market-table').querySelector('tbody').innerHTML = b3MHtml || '<tr><td colspan="4" style="text-align:center">لا توجد عملات مضافة</td></tr>';
 
-    // جدول المحفظة
     let wHtml = '';
     (d.wallet_assets||[]).forEach(a=>{
       const canSell = a.asset !== 'USDT' && a.free > 0;
@@ -1143,10 +1176,9 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/save_bot_config':
             b_name = data.pop("bot_name", "BOT_1")
             database.update_bot_config(b_name, data)
-            add_log(f"تم حفظ إعدادات {b_name}", "system", "info")
+            add_log(f"تم حفظ إعدادات {b_name} في قاعدة البيانات", "system", "info")
             self.send_response(200); self.end_headers()
 
-        # إضافة عملة للبوت
         elif self.path == '/api/add_symbol':
             b_name = data.get("bot_name", "BOT_1")
             raw_sym = data.get("symbol", "").strip().upper()
@@ -1168,7 +1200,6 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
-        # حذف عملة من البوت
         elif self.path == '/api/remove_symbol':
             b_name = data.get("bot_name", "BOT_1")
             sym = data.get("symbol", "").strip().upper()
