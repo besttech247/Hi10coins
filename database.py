@@ -7,7 +7,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    # 1. جدول المستخدمين
+    # جدول المستخدمين
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -16,7 +16,7 @@ def init_db():
     )
     """)
 
-    # 2. جدول مفاتيح منصة MEXC
+    # جدول مفاتيح منصة MEXC
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS exchange_keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,14 +25,12 @@ def init_db():
     )
     """)
 
-    # 3. جدول إعدادات البوتات الثلاثة
+    # جدول إعدادات البوتات (تداول حقيقي فقط)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS bots_config (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         bot_name TEXT UNIQUE NOT NULL,
         display_name TEXT NOT NULL,
-        paper_trading INTEGER DEFAULT 1,
-        initial_capital REAL DEFAULT 500.0,
         trade_size_usdt REAL DEFAULT 10.0,
         timeframe TEXT DEFAULT '5m',
         tp_pct REAL DEFAULT 0.015,
@@ -50,16 +48,16 @@ def init_db():
 
     # تهيئة البوتات الثلاثة
     cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, paper_trading, initial_capital, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', 1, 500.0, 10.0, '5m', 0.015, 0.0049, 0, 'RUNNING')
+    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
+    VALUES (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', 10.0, '5m', 0.015, 0.0049, 0, 'RUNNING')
     """)
     cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, paper_trading, initial_capital, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (2, 'BOT_2', '⚡ Bot 2 (EWO Custom TF)', 1, 500.0, 10.0, '15m', 0.02, 0.006, 0, 'PAUSED')
+    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
+    VALUES (2, 'BOT_2', '⚡ Bot 2 (EWO Custom TF)', 10.0, '15m', 0.02, 0.006, 0, 'PAUSED')
     """)
     cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, paper_trading, initial_capital, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (3, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Auto Bracket)', 1, 500.0, 10.0, '1m', 0.015, 0.005, 1, 'RUNNING')
+    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
+    VALUES (3, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Auto Bracket)', 10.0, '1m', 0.015, 0.005, 1, 'RUNNING')
     """)
 
     conn.commit()
