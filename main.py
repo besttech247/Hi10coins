@@ -2,28 +2,111 @@ import http.server
 import socketserver
 import threading
 import json
+import urllib.request
+import urllib.parse
+import urllib.error
+import ssl
+import time
+import hmac
+import hashlib
+import os
+import math
 import secrets
 from http import cookies
 from datetime import datetime, timezone
-import time
+import sqlite3
 
-# استدعاء الملفات المقسمة
-import database
-from exchanges import mexc
-from strategies import ewo_bot, rsi_bot
-
-PORT = 8080
+# =====================================================================
+# ⚙️ إعدادات المنفذ لبيئة Railway
+# =====================================================================
+PORT = int(os.environ.get("PORT", 8080))
+BASE_URL = "https://api.mexc.com"
+DB_FILE = "bot_data.db"
 ACTIVE_SESSIONS = set()
-
-# 1. تهيئة قاعدة البيانات تلقائياً عند الإقلاع
-database.init_db()
+ssl_ctx = ssl._create_unverified_context()
 
 SYMBOLS = [
     "NEARUSDT", "AVAXUSDT", "SOLUSDT", "DOGEUSDT", "BTCUSDT",
     "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT"
 ]
 
-# كائن الحالة المشترك لكافة البوتات
+PRECISION_MAP = {
+    "NEARUSDT": 2, "AVAXUSDT": 2, "SOLUSDT": 2, "DOGEUSDT": 0, "BTCUSDT": 4,
+    "ETHUSDT": 4, "BNBUSDT": 3, "XRPUSDT": 1, "ADAUSDT": 1, "LINKUSDT": 2
+}
+
+# =====================================================================
+# 🗄️ تهيئة قاعدة بيانات SQLite تلقائياً
+# =====================================================================
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS bots_config (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_name TEXT UNIQUE NOT NULL,
+        api_key TEXT DEFAULT '',
+        api_secret TEXT DEFAULT '',
+        paper_trading INTEGER DEFAULT 1,
+        initial_capital REAL DEFAULT 500.0,
+        trade_size_usdt REAL DEFAULT 10.0,
+        status TEXT DEFAULT 'RUNNING'
+    )
+    """)
+
+    # حساب المدير: admin / admin123
+    default_pass = hashlib.sha256("admin123".encode('utf-8')).hexdigest()
+    cursor.execute("INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'admin', ?)", (default_pass,))
+    
+    # تهيئة إعدادات البوتين
+    cursor.execute("INSERT OR IGNORE INTO bots_config (id, bot_name, paper_trading, trade_size_usdt, status) VALUES (1, 'EWO_BOT', 1, 10.0, 'RUNNING')")
+    cursor.execute("INSERT OR IGNORE INTO bots_config (id, bot_name, paper_trading, trade_size_usdt, status) VALUES (2, 'RSI_BOT', 1, 10.0, 'PAUSED')")
+
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def get_bot_config(bot_name):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM bots_config WHERE bot_name = ?", (bot_name,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+def update_bot_config(bot_name, updates):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    fields = [f"{k} = ?" for k in updates.keys()]
+    values = list(updates.values())
+    values.append(bot_name)
+    cursor.execute(f"UPDATE bots_config SET {', '.join(fields)} WHERE bot_name = ?", values)
+    conn.commit()
+    conn.close()
+
+def verify_user(username, password):
+    pass_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username, pass_hash))
+    user = cursor.fetchone()
+    conn.close()
+    return user is not None
+
+# =====================================================================
+# 📊 الحالة العامة المشتركة
+# =====================================================================
 shared_state = {
     "api_connected": False,
     "real_balance": 0.0,
@@ -34,20 +117,16 @@ shared_state = {
         "current_day": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
         "virtual_balance": 500.0,
         "daily_pnl_portfolio": 0.0,
-        "total_realized_pnl": 0.0,
         "total_trades": 0,
         "winning_trades": 0,
-        "daily_pnl_coins": {sym: 0.0 for sym in SYMBOLS},
         "active_positions": {sym: [] for sym in SYMBOLS}
     },
     "rsi": {
         "current_day": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
         "virtual_balance": 500.0,
         "daily_pnl_portfolio": 0.0,
-        "total_realized_pnl": 0.0,
         "total_trades": 0,
         "winning_trades": 0,
-        "daily_pnl_coins": {sym: 0.0 for sym in SYMBOLS},
         "active_positions": {sym: [] for sym in SYMBOLS}
     }
 }
@@ -59,71 +138,219 @@ def add_log(msg, log_type="info"):
         shared_state["recent_logs"].pop()
 
 # =====================================================================
-# 🔄 حلقة تحديث المحفظة اللحظية من MEXC
+# 🔐 محرك MEXC API ودقة الكسور
 # =====================================================================
-def wallet_sync_loop():
-    mexc.fetch_exchange_precisions()
-    while True:
-        try:
-            cfg = database.get_bot_config("EWO_BOT")
-            k, s = cfg.get("api_key", "").strip(), cfg.get("api_secret", "").strip()
-            if k and s:
-                ok, balances = mexc.get_account_balances(k, s)
-                if ok:
-                    shared_state["api_connected"] = True
-                    shared_state["wallet_assets"] = balances
-                    for b in balances:
-                        if b["asset"] == "USDT":
-                            shared_state["real_balance"] = b["free"]
-                else:
-                    shared_state["api_connected"] = False
-        except Exception as e:
-            add_log(f"خطأ مزامنة المحفظة: {e}", "warning")
-        time.sleep(10)
+def sign_query(query_string, secret):
+    return hmac.new(secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+
+def mexc_private_request(api_key, api_secret, endpoint, method="GET", params=None):
+    if not api_key or not api_secret:
+        return False, "مفاتيح API مفقودة"
+    if params is None:
+        params = {}
+    params["timestamp"] = int(time.time() * 1000)
+    query_string = urllib.parse.urlencode(params)
+    signature = sign_query(query_string, api_secret)
+    url = f"{BASE_URL}{endpoint}?{query_string}&signature={signature}"
+    headers = {"X-MEXC-APIKEY": api_key, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+    try:
+        req = urllib.request.Request(url, headers=headers, method=method)
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=8) as res:
+            return True, json.loads(res.read().decode('utf-8'))
+    except Exception as e:
+        return False, str(e)
+
+def format_quantity(symbol, qty):
+    prec = PRECISION_MAP.get(symbol, 2)
+    factor = 10 ** prec
+    truncated = math.floor(qty * factor) / factor
+    return f"{int(truncated)}" if prec == 0 else f"{truncated:.{prec}f}"
+
+def get_orderbook(symbol):
+    try:
+        url = f"{BASE_URL}/api/v3/ticker/bookTicker?symbol={symbol}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=5) as res:
+            d = json.loads(res.read().decode('utf-8'))
+            return float(d['bidPrice']), float(d['askPrice'])
+    except Exception:
+        return None, None
+
+def fetch_klines(symbol, limit=45):
+    try:
+        url = f"{BASE_URL}/api/v3/klines?symbol={symbol}&interval=5m&limit={limit}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=7) as res:
+            data = json.loads(res.read().decode('utf-8'))
+            return [{'open': float(r[1]), 'high': float(r[2]), 'low': float(r[3]), 'close': float(r[4])} for r in data]
+    except Exception:
+        return []
+
+def place_order(api_key, api_secret, symbol, side, qty=None, quote_qty=None, is_paper=True):
+    if is_paper:
+        return True, {"status": "FILLED"}
+    params = {"symbol": symbol, "side": side.upper(), "type": "MARKET"}
+    if side.upper() == "BUY" and quote_qty:
+        params["quoteOrderQty"] = f"{quote_qty:.2f}"
+    elif qty:
+        params["quantity"] = format_quantity(symbol, qty)
+    else:
+        return False, "تحديد الكمية مطلوب"
+    return mexc_private_request(api_key, api_secret, "/api/v3/order", method="POST", params=params)
 
 # =====================================================================
-# 🌐 واجهات HTML المدمجة (تسجيل الدخول + لوحة التبويبات)
+# 🤖 منطق استراتيجيات التداول
+# =====================================================================
+def calculate_ewo(candles):
+    if len(candles) < 38: return None, None, None
+    medians = [(c['high'] + c['low']) / 2.0 for c in candles]
+    vals = []
+    for offset in [3, 2, 1]:
+        sub = medians[:len(candles) - offset + 1]
+        sma5 = sum(sub[-5:]) / 5.0
+        sma35 = sum(sub[-35:]) / 35.0
+        vals.append(sma5 - sma35)
+    return vals[0], vals[1], vals[2]
+
+def calculate_rsi(candles, period=14):
+    if len(candles) < period + 1: return 50.0
+    closes = [c['close'] for c in candles]
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i-1]
+        gains.append(max(0.0, diff))
+        losses.append(max(0.0, -diff))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0: return 100.0
+    return 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
+
+def trading_engine_loop():
+    add_log("تم تشغيل محرك التداول المزدوج (EWO + RSI)", "info")
+    while True:
+        try:
+            cfg_ewo = get_bot_config("EWO_BOT")
+            cfg_rsi = get_bot_config("RSI_BOT")
+
+            # مزامنة رصيد المحفظة الحقيقي
+            k, s = cfg_ewo.get("api_key", "").strip(), cfg_ewo.get("api_secret", "").strip()
+            if k and s:
+                ok, acc = mexc_private_request(k, s, "/api/v3/account")
+                if ok and "balances" in acc:
+                    shared_state["api_connected"] = True
+                    shared_state["wallet_assets"] = [b for b in acc["balances"] if float(b["free"]) + float(b["locked"]) > 0.0001]
+                    for b in shared_state["wallet_assets"]:
+                        if b["asset"] == "USDT":
+                            shared_state["real_balance"] = float(b["free"])
+                else:
+                    shared_state["api_connected"] = False
+
+            # فحص السوق للعملات
+            for sym in SYMBOLS:
+                bid, ask = get_orderbook(sym)
+                if bid and ask:
+                    shared_state["market_prices"][sym] = {"bid": bid, "ask": ask}
+
+                candles = fetch_klines(sym)
+                if not candles or not bid: continue
+
+                # --- دورة بوت EWO ---
+                if cfg_ewo.get("status") != "STOPPED":
+                    e3, e2, e1 = calculate_ewo(candles)
+                    if e1 is not None:
+                        is_p = bool(cfg_ewo.get("paper_trading", 1))
+                        size = float(cfg_ewo.get("trade_size_usdt", 10.0))
+                        
+                        # متابعة الخروج
+                        still = []
+                        for pos in shared_state["ewo"]["active_positions"].get(sym, []):
+                            sl = pos['entry_price'] * (1.0 - 0.0049)
+                            if bid <= sl or ((e2 > 0) and (e1 < e2)):
+                                ok, res = place_order(k, s, sym, "SELL", qty=pos['qty'], is_paper=is_p)
+                                if ok:
+                                    pnl = (bid - pos['entry_price']) * pos['qty']
+                                    shared_state["ewo"]["virtual_balance"] += (size + pnl)
+                                    shared_state["ewo"]["daily_pnl_portfolio"] += pnl
+                                    shared_state["ewo"]["total_trades"] += 1
+                                    if pnl > 0: shared_state["ewo"]["winning_trades"] += 1
+                                    add_log(f"[EWO] بيع {sym} PnL: {pnl:+.3f}$", "success" if pnl>0 else "danger")
+                                else: still.append(pos)
+                            else: still.append(pos)
+                        shared_state["ewo"]["active_positions"][sym] = still
+
+                        # الدخول
+                        if cfg_ewo.get("status") == "RUNNING" and len(still) < 3 and (e1 < 0 and e1 > e2 and e2 <= e3):
+                            q = float(format_quantity(sym, size / ask))
+                            if q > 0:
+                                ok, res = place_order(k, s, sym, "BUY", qty=q, quote_qty=size, is_paper=is_p)
+                                if ok:
+                                    if is_p: shared_state["ewo"]["virtual_balance"] -= size
+                                    shared_state["ewo"]["active_positions"][sym].append({'entry_price': ask, 'qty': q, 'time': datetime.now(timezone.utc).strftime("%H:%M")})
+                                    add_log(f"[EWO] 🚀 شراء {sym} عند {ask}$", "primary")
+
+                # --- دورة بوت RSI ---
+                if cfg_rsi.get("status") != "STOPPED":
+                    rsi = calculate_rsi(candles)
+                    is_p = bool(cfg_rsi.get("paper_trading", 1))
+                    size = float(cfg_rsi.get("trade_size_usdt", 10.0))
+                    
+                    still_rsi = []
+                    for pos in shared_state["rsi"]["active_positions"].get(sym, []):
+                        sl = pos['entry_price'] * (1.0 - 0.008)
+                        if bid <= sl or rsi >= 68:
+                            ok, res = place_order(k, s, sym, "SELL", qty=pos['qty'], is_paper=is_p)
+                            if ok:
+                                pnl = (bid - pos['entry_price']) * pos['qty']
+                                shared_state["rsi"]["virtual_balance"] += (size + pnl)
+                                shared_state["rsi"]["daily_pnl_portfolio"] += pnl
+                                shared_state["rsi"]["total_trades"] += 1
+                                if pnl > 0: shared_state["rsi"]["winning_trades"] += 1
+                                add_log(f"[RSI] بيع {sym} PnL: {pnl:+.3f}$", "success" if pnl>0 else "danger")
+                            else: still_rsi.append(pos)
+                        else: still_rsi.append(pos)
+                    shared_state["rsi"]["active_positions"][sym] = still_rsi
+
+                    if cfg_rsi.get("status") == "RUNNING" and len(still_rsi) < 2 and rsi <= 28:
+                        q = float(format_quantity(sym, size / ask))
+                        if q > 0:
+                            ok, res = place_order(k, s, sym, "BUY", qty=q, quote_qty=size, is_paper=is_p)
+                            if ok:
+                                if is_p: shared_state["rsi"]["virtual_balance"] -= size
+                                shared_state["rsi"]["active_positions"][sym].append({'entry_price': ask, 'qty': q, 'time': datetime.now(timezone.utc).strftime("%H:%M")})
+                                add_log(f"[RSI] ⚡ شراء تشبع {sym} (RSI:{rsi:.0f})", "primary")
+
+        except Exception as e:
+            add_log(f"تنبيه المحرك: {e}", "warning")
+        time.sleep(8)
+
+# =====================================================================
+# 🌐 واجهات HTML الموحدة
 # =====================================================================
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>تسجيل الدخول - Crypto Hub</title>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>دخول - Command Hub</title>
 <style>
-:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--text:#f3f4f6;--sub:#94a3b8}
-*{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif}
-body{background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;height:100vh;padding:14px}
-.box{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:24px;width:100%;max-width:380px;box-shadow:0 8px 24px #00000044}
-h2{font-size:18px;margin-bottom:6px;text-align:center}
-p{font-size:12px;color:var(--sub);text-align:center;margin-bottom:18px}
-.group{margin-bottom:14px}
-label{display:block;font-size:12px;color:var(--sub);margin-bottom:5px}
-input{width:100%;padding:10px 12px;background:#090d16;border:1px solid var(--border);border-radius:8px;color:#fff;font-size:13px}
-button{width:100%;padding:10px;background:var(--primary);color:#fff;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:14px;margin-top:8px}
-.err{color:#ef4444;font-size:12px;text-align:center;margin-top:10px;display:none}
+body{background:#090d16;color:#f3f4f6;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.box{background:#111827;padding:24px;border-radius:12px;width:320px;border:1px solid #1f293d}
+input{width:100%;padding:10px;margin:8px 0;background:#090d16;border:1px solid #1f293d;color:#fff;border-radius:6px;box-sizing:border-box}
+button{width:100%;padding:10px;background:#3b82f6;color:#fff;border:none;border-radius:6px;font-weight:bold;cursor:pointer}
 </style>
 </head>
 <body>
 <div class="box">
-  <h2>🔐 لوحة القيادة المركزية</h2>
-  <p>سجل الدخول لإدارة البوتات والمحفظة</p>
+  <h3 style="text-align:center;margin-bottom:12px">🔐 تسجيل الدخول</h3>
   <form id="f">
-    <div class="group"><label>اسم المستخدم</label><input type="text" id="u" placeholder="admin" required></div>
-    <div class="group"><label>كلمة المرور</label><input type="password" id="p" placeholder="admin123" required></div>
-    <button type="submit">تسجيل الدخول</button>
-    <div id="err" class="err">بيانات الدخول غير صحيحة!</div>
+    <input type="text" id="u" placeholder="اسم المستخدم" required>
+    <input type="password" id="p" placeholder="كلمة المرور" required>
+    <button type="submit">دخول</button>
   </form>
 </div>
 <script>
-document.getElementById('f').addEventListener('submit', async(e)=>{
+document.getElementById('f').onsubmit=async(e)=>{
   e.preventDefault();
-  const res = await fetch('/api/login', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({username: document.getElementById('u').value, password: document.getElementById('p').value})
-  });
-  if(res.ok){ window.location.href = '/'; } else { document.getElementById('err').style.display = 'block'; }
-});
+  const r=await fetch('/api/login',{method:'POST',body:JSON.stringify({username:u.value,password:p.value})});
+  if(r.ok) location.href='/'; else alert('خطأ في بيانات الدخول');
+};
 </script>
 </body>
 </html>"""
@@ -131,284 +358,150 @@ document.getElementById('f').addEventListener('submit', async(e)=>{
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Command Hub - Multi-Bot System</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>MEXC Multi-Bot Hub</title>
 <style>
-:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--warning:#f59e0b;--text:#f3f4f6;--sub:#94a3b8}
-*{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,sans-serif}
-body{background:var(--bg);color:var(--text);padding:12px;line-height:1.5}
-.container{max-width:1020px;margin:0 auto}
-.header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--card);border-radius:12px;border:1px solid var(--border);margin-bottom:12px;flex-wrap:wrap;gap:10px}
-.nav-tabs{display:flex;gap:8px;margin-bottom:12px;border-bottom:1px solid var(--border);padding-bottom:8px;overflow-x:auto}
-.tab-btn{padding:8px 16px;background:#151e30;border:1px solid var(--border);border-radius:8px;color:var(--sub);cursor:pointer;font-weight:bold;font-size:13px;white-space:nowrap}
-.tab-btn.active{background:var(--primary);color:#fff;border-color:var(--primary)}
-.tab-content{display:none}
-.tab-content.active{display:block}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:12px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px}
-.card-title{font-size:11px;color:var(--sub);margin-bottom:4px}
-.card-val{font-size:20px;font-weight:bold}
-.btn{padding:6px 12px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:12px}
-.btn-run{background:var(--success);color:#fff}
-.btn-pause{background:var(--warning);color:#000}
-.btn-stop{background:var(--danger);color:#fff}
-.btn-panic{background:var(--danger);color:#fff;font-size:11px;padding:3px 8px}
-.btn-buy{background:var(--primary);color:#fff;font-size:11px;padding:3px 8px}
-.btn-copy{background:#334155;color:#fff;font-size:11px;padding:3px 7px}
+:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui}
+body{background:var(--bg);color:var(--text);padding:12px}
+.tabs{display:flex;gap:6px;margin:12px 0}
+.tab{padding:8px 14px;background:#151e30;border:1px solid var(--border);border-radius:8px;color:var(--sub);cursor:pointer;font-weight:bold}
+.tab.active{background:var(--primary);color:#fff}
+.tab-pane{display:none}
+.tab-pane.active{display:block}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:10px}
+.val{font-size:20px;font-weight:bold}
+.btn{padding:5px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:12px}
 table{width:100%;border-collapse:collapse;text-align:right}
-th,td{padding:8px 10px;font-size:12px;border-bottom:1px solid var(--border)}
-th{color:var(--sub)}
-.table-wrap{overflow-x:auto}
-details{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:12px;overflow:hidden}
-summary{padding:10px 14px;cursor:pointer;font-weight:bold;font-size:13px;background:#151e30;display:flex;justify-content:space-between;align-items:center}
-.details-content{padding:12px}
-.logs{max-height:200px;overflow-y:auto;font-family:monospace;font-size:11px}
-.log-row{padding:3px 0;border-bottom:1px solid #1f293d44}
-.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
-input,select{background:#090d16;border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:6px;font-size:12px;width:100%}
+th,td{padding:7px;border-bottom:1px solid var(--border);font-size:12px}
+.logs{max-height:160px;overflow-y:auto;font-family:monospace;font-size:11px}
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="header">
-    <div>
-      <h2 style="font-size:16px">🎛️ Command Hub (Modular Multi-Bot Engine)</h2>
-      <p style="font-size:11px;color:var(--sub)">نظام إدارة وتداول العملات المتعدد على السيرفر السحابي</p>
-    </div>
-    <div style="display:flex;align-items:center;gap:8px">
-      <span id="api-status" style="font-size:11px;color:var(--sub)">فحص API...</span>
-      <button class="btn" style="background:#334155;color:#fff" onclick="logout()">🚪 خروج</button>
-    </div>
+  <div style="display:flex;justify-content:space-between;align-items:center" class="card">
+    <div><strong>🎛️ لوحة القيادة الموحدة (Single File)</strong></div>
+    <div id="api-stat" style="font-size:12px;color:var(--sub)">جاري الاتصال...</div>
   </div>
 
-  <!-- شريط التبويبات -->
-  <div class="nav-tabs">
-    <button class="tab-btn active" onclick="switchTab('tab-ewo', this)">🤖 EWO Momentum Bot</button>
-    <button class="tab-btn" onclick="switchTab('tab-rsi', this)">⚡ RSI Scalper Bot</button>
-    <button class="tab-btn" onclick="switchTab('tab-wallet', this)">💰 المحفظة والتسييل الطارئ</button>
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('t1', this)">🤖 EWO Momentum</button>
+    <button class="tab" onclick="showTab('t2', this)">⚡ RSI Scalper</button>
+    <button class="tab" onclick="showTab('t3', this)">💰 المحفظة والتسييل</button>
   </div>
 
-  <!-- 1. تبويب EWO Bot -->
-  <div id="tab-ewo" class="tab-content active">
-    <div class="header" style="background:#151e30">
-      <div><strong>حالة EWO Bot:</strong> <span id="ewo-status-text">RUNNING</span></div>
-      <div style="display:flex;gap:6px">
-        <button class="btn btn-run" onclick="setBotStatus('EWO_BOT','RUNNING')">▶️ تشغيل</button>
-        <button class="btn btn-pause" onclick="setBotStatus('EWO_BOT','PAUSED')">⏸️ إيقاف مؤقت</button>
-        <button class="btn btn-stop" onclick="setBotStatus('EWO_BOT','STOPPED')">⏹️ إيقاف</button>
+  <!-- EWO -->
+  <div id="t1" class="tab-pane active">
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+      <span>الحالة: <strong id="ewo-st">RUNNING</strong></span>
+      <div>
+        <button class="btn" style="background:var(--success);color:#fff" onclick="setSt('EWO_BOT','RUNNING')">▶️ تشغيل</button>
+        <button class="btn" style="background:#f59e0b;color:#000" onclick="setSt('EWO_BOT','PAUSED')">⏸️ إيقاف مؤقت</button>
       </div>
     </div>
     <div class="grid">
-      <div class="card"><div class="card-title">الرصيد المتاح (EWO)</div><div class="card-val" id="ewo-bal">0.00$</div></div>
-      <div class="card"><div class="card-title">أرباح اليوم المحققة</div><div class="card-val" id="ewo-pnl">+0.00$</div></div>
-      <div class="card"><div class="card-title">نسبة النجاح</div><div class="card-val" id="ewo-winrate">0.0%</div></div>
+      <div class="card"><div style="font-size:11px;color:var(--sub)">الرصيد الافتراضي</div><div class="val" id="ewo-bal">0$</div></div>
+      <div class="card"><div style="font-size:11px;color:var(--sub)">أرباح اليوم</div><div class="val" id="ewo-pnl">0$</div></div>
     </div>
-    <details>
-      <summary style="color:#60a5fa"><span>⚙️ إعدادات EWO Momentum</span><span>تعديل ▾</span></summary>
-      <div class="details-content">
-        <div class="form-grid">
-          <div><label style="font-size:11px;color:var(--sub)">النمط</label><select id="ewo-mode"><option value="1">تجريبي</option><option value="0">حقيقي</option></select></div>
-          <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="ewo-size" value="10"></div>
-          <div><label style="font-size:11px;color:var(--sub)">API Key</label><input type="password" id="mexc-k"></div>
-          <div><label style="font-size:11px;color:var(--sub)">API Secret</label><input type="password" id="mexc-s"></div>
-        </div>
-        <button class="btn" style="background:var(--primary);color:#fff;margin-top:8px;width:100%" onclick="saveCfg('EWO_BOT', 'ewo')">💾 حفظ الإعدادات</button>
-      </div>
-    </details>
-    <details open>
-      <summary><span>📂 صفقات EWO المفتوحة</span><span id="ewo-pos-count">0 صفقات</span></summary>
-      <div class="details-content table-wrap">
-        <table><thead><tr><th>العملة</th><th>سعر الدخول</th><th>السعر الحالي</th><th>الكمية</th><th>الوقت</th></tr></thead><tbody id="ewo-positions-body"></tbody></table>
-      </div>
-    </details>
+    <div class="card">
+      <strong style="font-size:12px">الصفقات المفتوحة (EWO):</strong>
+      <div style="overflow-x:auto"><table id="ewo-orders"><thead><tr><th>العملة</th><th>سعر الدخول</th><th>الكمية</th></tr></thead><tbody></tbody></table></div>
+    </div>
   </div>
 
-  <!-- 2. تبويب RSI Bot -->
-  <div id="tab-rsi" class="tab-content">
-    <div class="header" style="background:#151e30">
-      <div><strong>حالة RSI Bot:</strong> <span id="rsi-status-text">PAUSED</span></div>
-      <div style="display:flex;gap:6px">
-        <button class="btn btn-run" onclick="setBotStatus('RSI_BOT','RUNNING')">▶️ تشغيل</button>
-        <button class="btn btn-pause" onclick="setBotStatus('RSI_BOT','PAUSED')">⏸️ إيقاف مؤقت</button>
-        <button class="btn btn-stop" onclick="setBotStatus('RSI_BOT','STOPPED')">⏹️ إيقاف</button>
+  <!-- RSI -->
+  <div id="t2" class="tab-pane">
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+      <span>الحالة: <strong id="rsi-st">PAUSED</strong></span>
+      <div>
+        <button class="btn" style="background:var(--success);color:#fff" onclick="setSt('RSI_BOT','RUNNING')">▶️ تشغيل</button>
+        <button class="btn" style="background:#f59e0b;color:#000" onclick="setSt('RSI_BOT','PAUSED')">⏸️ إيقاف مؤقت</button>
       </div>
     </div>
     <div class="grid">
-      <div class="card"><div class="card-title">الرصيد المتاح (RSI)</div><div class="card-val" id="rsi-bal">0.00$</div></div>
-      <div class="card"><div class="card-title">أرباح اليوم المحققة</div><div class="card-val" id="rsi-pnl">+0.00$</div></div>
-      <div class="card"><div class="card-title">نسبة النجاح</div><div class="card-val" id="rsi-winrate">0.0%</div></div>
+      <div class="card"><div style="font-size:11px;color:var(--sub)">الرصيد الافتراضي</div><div class="val" id="rsi-bal">0$</div></div>
+      <div class="card"><div style="font-size:11px;color:var(--sub)">أرباح اليوم</div><div class="val" id="rsi-pnl">0$</div></div>
     </div>
-    <details>
-      <summary style="color:#a78bfa"><span>⚙️ إعدادات RSI Scalper</span><span>تعديل ▾</span></summary>
-      <div class="details-content">
-        <div class="form-grid">
-          <div><label style="font-size:11px;color:var(--sub)">النمط</label><select id="rsi-mode"><option value="1">تجريبي</option><option value="0">حقيقي</option></select></div>
-          <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="rsi-size" value="10"></div>
-        </div>
-        <button class="btn" style="background:var(--primary);color:#fff;margin-top:8px;width:100%" onclick="saveCfg('RSI_BOT', 'rsi')">💾 حفظ الإعدادات</button>
-      </div>
-    </details>
-    <details open>
-      <summary><span>📂 صفقات RSI المفتوحة</span><span id="rsi-pos-count">0 صفقات</span></summary>
-      <div class="details-content table-wrap">
-        <table><thead><tr><th>العملة</th><th>سعر الدخول</th><th>السعر الحالي</th><th>الكمية</th><th>الوقت</th></tr></thead><tbody id="rsi-positions-body"></tbody></table>
-      </div>
-    </details>
-  </div>
-
-  <!-- 3. تبويب المحفظة العامة -->
-  <div id="tab-wallet" class="tab-content">
-    <div class="card" style="margin-bottom:10px">
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>العملة</th><th>المتاح (Free)</th><th>المحجوز</th><th>الإجمالي</th><th>إجراء تسييل</th></tr></thead>
-          <tbody id="wallet-body"></tbody>
-        </table>
-      </div>
+    <div class="card">
+      <strong style="font-size:12px">الصفقات المفتوحة (RSI):</strong>
+      <div style="overflow-x:auto"><table id="rsi-orders"><thead><tr><th>العملة</th><th>سعر الدخول</th><th>الكمية</th></tr></thead><tbody></tbody></table></div>
     </div>
   </div>
 
-  <!-- سجل العمليات العام -->
-  <details open>
-    <summary><span>📜 سجل الأحداث والعمليات الفورية لجميع البوتات</span><button class="btn btn-copy" onclick="event.stopPropagation();copyLogs()">📋 نسخ السجلات</button></summary>
-    <div class="details-content"><div class="logs" id="logs-box"></div></div>
-  </details>
-</div>
+  <!-- Wallet -->
+  <div id="t3" class="tab-pane">
+    <div class="card">
+      <div style="overflow-x:auto"><table id="w-table"><thead><tr><th>العملة</th><th>المتاح</th><th>إجراء تسييل</th></tr></thead><tbody></tbody></table></div>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div class="card">
+    <div style="font-size:12px;font-weight:bold;margin-bottom:6px">📜 سجل العمليات المباشر:</div>
+    <div class="logs" id="logs"></div>
+  </div>
 
 <script>
-let logsText = "";
-function switchTab(id, btn){
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+function showTab(id, btn){
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
   document.getElementById(id).classList.add('active');
   btn.classList.add('active');
 }
-function copyLogs(){
-  navigator.clipboard.writeText(logsText).then(()=>alert("✅ تم نسخ السجلات!"));
+async function setSt(b,s){
+  await fetch('/api/control',{method:'POST',body:JSON.stringify({bot_name:b,status:s})});
+  update();
 }
-async function logout(){
-  await fetch('/api/logout', {method:'POST'});
-  window.location.href = '/login';
-}
-async function setBotStatus(botName, status){
-  await fetch('/api/control', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({bot_name: botName, status: status})
-  });
-  refresh();
-}
-async function saveCfg(botName, prefix){
-  const payload = {
-    bot_name: botName,
-    paper_trading: parseInt(document.getElementById(prefix+'-mode').value),
-    trade_size_usdt: parseFloat(document.getElementById(prefix+'-size').value)||10
-  };
-  if(prefix==='ewo'){
-    payload.api_key = document.getElementById('mexc-k').value;
-    payload.api_secret = document.getElementById('mexc-s').value;
-  }
-  await fetch('/api/save_config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload)
-  });
-  alert("✅ تم حفظ الإعدادات في SQLite!");
-  refresh();
-}
-async function panicSell(asset){
-  if(confirm(`هل أنت متأكد من تسييل ${asset} فورياً بسعر السوق؟`)){
-    const res = await fetch('/api/panic_sell', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({asset: asset})
-    });
-    const d = await res.json();
-    alert(d.msg || JSON.stringify(d));
-    refresh();
-  }
-}
-
-async function refresh(){
+async function update(){
   try{
     const res = await fetch('/api/data');
-    if(res.status === 401){ window.location.href = '/login'; return; }
+    if(res.status===401) location.href='/login';
     const d = await res.json();
+    
+    document.getElementById('api-stat').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 MEXC متصل</span>' : '<span style="color:var(--danger)">🔴 API غير متصل</span>';
 
-    document.getElementById('api-status').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 MEXC متصل</span>' : '<span style="color:var(--danger)">🔴 API غير متصل</span>';
-
-    // EWO Data
-    const ewoBal = d.ewo.virtual_balance;
-    document.getElementById('ewo-bal').innerText = ewoBal.toFixed(2)+'$';
+    // EWO
+    document.getElementById('ewo-bal').innerText = d.ewo.virtual_balance.toFixed(2)+'$';
     document.getElementById('ewo-pnl').innerText = (d.ewo.daily_pnl_portfolio>=0?'+':'')+d.ewo.daily_pnl_portfolio.toFixed(3)+'$';
-    document.getElementById('ewo-winrate').innerText = d.ewo.total_trades>0 ? ((d.ewo.winning_trades/d.ewo.total_trades)*100).toFixed(1)+'%' : '0.0%';
-    
-    let ewoPosHtml = '';
-    let ewoCount = 0;
-    for(const sym of Object.keys(d.ewo.active_positions)){
-      (d.ewo.active_positions[sym]||[]).forEach(p=>{
-        ewoCount++;
-        const cur = d.market_prices[sym]?.bid || p.entry_price;
-        ewoPosHtml += `<tr><td><strong>${sym}</strong></td><td>${p.entry_price.toFixed(4)}$</td><td>${cur.toFixed(4)}$</td><td>${p.qty}</td><td>${p.time}</td></tr>`;
-      });
+    let eHtml = '';
+    for(let s in d.ewo.active_positions){
+      d.ewo.active_positions[s].forEach(p=>{ eHtml += `<tr><td>${s}</td><td>${p.entry_price}$</td><td>${p.qty}</td></tr>`; });
     }
-    document.getElementById('ewo-pos-count').innerText = `${ewoCount} صفقات`;
-    document.getElementById('ewo-positions-body').innerHTML = ewoPosHtml || '<tr><td colspan="5" style="text-align:center;color:var(--sub)">لا توجد صفقات مفتوحة لـ EWO</td></tr>';
+    document.getElementById('ewo-orders').querySelector('tbody').innerHTML = eHtml || '<tr><td colspan="3" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>';
 
-    // RSI Data
-    const rsiBal = d.rsi.virtual_balance;
-    document.getElementById('rsi-bal').innerText = rsiBal.toFixed(2)+'$';
+    // RSI
+    document.getElementById('rsi-bal').innerText = d.rsi.virtual_balance.toFixed(2)+'$';
     document.getElementById('rsi-pnl').innerText = (d.rsi.daily_pnl_portfolio>=0?'+':'')+d.rsi.daily_pnl_portfolio.toFixed(3)+'$';
-    document.getElementById('rsi-winrate').innerText = d.rsi.total_trades>0 ? ((d.rsi.winning_trades/d.rsi.total_trades)*100).toFixed(1)+'%' : '0.0%';
-    
-    let rsiPosHtml = '';
-    let rsiCount = 0;
-    for(const sym of Object.keys(d.rsi.active_positions)){
-      (d.rsi.active_positions[sym]||[]).forEach(p=>{
-        rsiCount++;
-        const cur = d.market_prices[sym]?.bid || p.entry_price;
-        rsiPosHtml += `<tr><td><strong>${sym}</strong></td><td>${p.entry_price.toFixed(4)}$</td><td>${cur.toFixed(4)}$</td><td>${p.qty}</td><td>${p.time}</td></tr>`;
-      });
+    let rHtml = '';
+    for(let s in d.rsi.active_positions){
+      d.rsi.active_positions[s].forEach(p=>{ rHtml += `<tr><td>${s}</td><td>${p.entry_price}$</td><td>${p.qty}</td></tr>`; });
     }
-    document.getElementById('rsi-pos-count').innerText = `${rsiCount} صفقات`;
-    document.getElementById('rsi-positions-body').innerHTML = rsiPosHtml || '<tr><td colspan="5" style="text-align:center;color:var(--sub)">لا توجد صفقات مفتوحة لـ RSI</td></tr>';
+    document.getElementById('rsi-orders').querySelector('tbody').innerHTML = rHtml || '<tr><td colspan="3" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>';
 
     // Wallet
     let wHtml = '';
-    if(d.wallet_assets && d.wallet_assets.length>0){
-      d.wallet_assets.forEach(a=>{
-        const canSell = a.asset!=='USDT' && a.free>0;
-        wHtml += `<tr><td><strong>${a.asset}</strong></td><td>${a.free}</td><td>${a.locked}</td><td>${a.total}</td><td>${canSell?`<button class="btn btn-panic" onclick="panicSell('${a.asset}')">🔥 تسييل</button>`:'-'}</td></tr>`;
-      });
-    } else {
-      wHtml = '<tr><td colspan="5" style="text-align:center;color:var(--sub)">لا توجد أرصدة ظاهرة أو الحساب في الوضع التجريبي</td></tr>';
-    }
-    document.getElementById('wallet-body').innerHTML = wHtml;
+    (d.wallet_assets||[]).forEach(a=>{
+      if(a.free>0 && a.asset!=='USDT') wHtml += `<tr><td>${a.asset}</td><td>${a.free}</td><td><button class="btn" style="background:var(--danger);color:#fff" onclick="panic('${a.asset}')">🔥 تسييل</button></td></tr>`;
+    });
+    document.getElementById('w-table').querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="3" style="text-align:center;color:var(--sub)">لا توجد عملات أو الحساب تجريبي</td></tr>';
 
     // Logs
     let lHtml = '';
-    logsText = '';
-    for(const l of d.recent_logs){
-      lHtml += `<div class="log-row"><span style="color:var(--sub)">[${l.time}]</span> <span>${l.msg}</span></div>`;
-      logsText += `[${l.time}] ${l.msg}\\n`;
-    }
-    document.getElementById('logs-box').innerHTML = lHtml || '<div style="color:var(--sub)">في انتظار السجلات...</div>';
+    (d.recent_logs||[]).forEach(l=>{ lHtml += `<div>[${l.time}] ${l.msg}</div>`; });
+    document.getElementById('logs').innerHTML = lHtml;
   }catch(e){}
 }
-setInterval(refresh, 2500);
-refresh();
+setInterval(update, 2500);
+update();
 </script>
 </body>
 </html>"""
 
 # =====================================================================
-# 🛡️ خادم الويب ومعالجة الطلبات
+# 🛡️ خادم الويب
 # =====================================================================
-class AuthenticatedServer(http.server.BaseHTTPRequestHandler):
+class WebHandler(http.server.BaseHTTPRequestHandler):
     def is_auth(self):
-        cookie = self.headers.get('Cookie')
-        if not cookie: return False
-        c = cookies.SimpleCookie(cookie)
+        c = cookies.SimpleCookie(self.headers.get('Cookie'))
         s = c.get('session_id')
         return s and s.value in ACTIVE_SESSIONS
 
@@ -421,7 +514,7 @@ class AuthenticatedServer(http.server.BaseHTTPRequestHandler):
             self.send_response(302); self.send_header('Location', '/login'); self.end_headers(); return
 
         if self.path == '/api/data':
-            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps(shared_state, ensure_ascii=False).encode('utf-8'))
         else:
             self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
@@ -432,13 +525,12 @@ class AuthenticatedServer(http.server.BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(length).decode('utf-8')) if length > 0 else {}
 
         if self.path == '/api/login':
-            if database.verify_user(data.get("username", ""), data.get("password", "")):
+            if verify_user(data.get("username", ""), data.get("password", "")):
                 token = secrets.token_hex(24)
                 ACTIVE_SESSIONS.add(token)
                 self.send_response(200)
                 self.send_header('Set-Cookie', f'session_id={token}; Path=/; HttpOnly; SameSite=Lax')
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
+                self.send_header('Content-Type', 'application/json'); self.end_headers()
                 self.wfile.write(json.dumps({"success": True}).encode('utf-8'))
             else:
                 self.send_response(401); self.end_headers()
@@ -447,73 +539,14 @@ class AuthenticatedServer(http.server.BaseHTTPRequestHandler):
         if not self.is_auth():
             self.send_response(401); self.end_headers(); return
 
-        if self.path == '/api/logout':
-            self.send_response(200); self.send_header('Set-Cookie', 'session_id=; Path=/; Max-Age=0'); self.end_headers()
-
-        elif self.path == '/api/save_config':
-            bot_name = data.get("bot_name", "EWO_BOT")
-            updates = {}
-            if "paper_trading" in data: updates["paper_trading"] = int(data["paper_trading"])
-            if "trade_size_usdt" in data: updates["trade_size_usdt"] = float(data["trade_size_usdt"])
-            if data.get("api_key"): updates["api_key"] = data["api_key"].strip()
-            if data.get("api_secret"): updates["api_secret"] = data["api_secret"].strip()
-            
-            database.update_bot_config(bot_name, updates)
-            add_log(f"تم تحديث إعدادات {bot_name} في قاعدة البيانات", "info")
+        if self.path == '/api/control':
+            update_bot_config(data.get("bot_name", "EWO_BOT"), {"status": data.get("status", "RUNNING")})
             self.send_response(200); self.end_headers()
 
-        elif self.path == '/api/control':
-            bot_name = data.get("bot_name", "EWO_BOT")
-            status = data.get("status", "RUNNING")
-            database.update_bot_config(bot_name, {"status": status})
-            add_log(f"تغيير حالة {bot_name} إلى: {status}", "info")
-            self.send_response(200); self.end_headers()
-
-        elif self.path == '/api/panic_sell':
-            asset = data.get("asset")
-            cfg = database.get_bot_config("EWO_BOT")
-            k, s = cfg.get("api_key", "").strip(), cfg.get("api_secret", "").strip()
-            
-            free_qty = 0.0
-            for a in shared_state.get("wallet_assets", []):
-                if a["asset"] == asset:
-                    free_qty = a["free"]
-                    break
-
-            if free_qty > 0 and k and s:
-                ok, res = mexc.place_order(k, s, f"{asset}USDT", "SELL", qty=free_qty, is_paper=False)
-                msg = f"✅ تم تسييل {asset} بنجاح!" if ok else f"❌ فشل التسييل: {res}"
-                add_log(f"تسييل طارئ لـ {asset}: {msg}", "danger")
-            else:
-                msg = "لا يوجد رصيد حر أو مفاتيح API غير متوفرة"
-
-            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
-            self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
-
-    def log_message(self, format, *args):
-        return
-
-def run_server():
-    with socketserver.TCPServer(("", PORT), AuthenticatedServer) as httpd:
-        httpd.serve_forever()
+    def log_message(self, format, *args): return
 
 if __name__ == "__main__":
-    print("="*60)
-    print(f"🚀 الخادم السحابي جاهز على المنفذ: {PORT}")
-    print(f"🔑 المدير الافتراضي: admin / admin123")
-    print("="*60)
-
-    # 1. تشغيل خادم الويب
-    threading.Thread(target=run_server, daemon=True).start()
-
-    # 2. تشغيل مزامنة المحفظة
-    threading.Thread(target=wallet_sync_loop, daemon=True).start()
-
-    # 3. تشغيل استراتيجية بوت EWO
-    threading.Thread(target=ewo_bot.run_ewo_loop, args=(shared_state, database.get_bot_config, add_log), daemon=True).start()
-
-    # 4. تشغيل استراتيجية بوت RSI
-    threading.Thread(target=rsi_bot.run_rsi_loop, args=(shared_state, database.get_bot_config, add_log), daemon=True).start()
-
-    while True:
-        time.sleep(1)
+    print(f"🚀 بدء التشغيل على المنفذ: {PORT}")
+    threading.Thread(target=trading_engine_loop, daemon=True).start()
+    with socketserver.TCPServer(("", PORT), WebHandler) as srv:
+        srv.serve_forever()
