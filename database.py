@@ -4,11 +4,10 @@ import hashlib
 DB_FILE = "bot_data.db"
 
 def init_db():
-    """تهيئة قاعدة البيانات والجداول وحساب المدير تلقائياً"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    # جدول المستخدمين لحماية لوحة التحكم
+    # 1. جدول تسجيل الدخول
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,64 +16,60 @@ def init_db():
     )
     """)
 
-    # جدول إعدادات البوتات المستقلة
+    # 2. جدول إعدادات المنصة الموحدة (MEXC)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS exchange_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        api_key TEXT DEFAULT '',
+        api_secret TEXT DEFAULT ''
+    )
+    """)
+
+    # 3. جدول إعدادات البوتات الثلاثة
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS bots_config (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         bot_name TEXT UNIQUE NOT NULL,
-        exchange TEXT DEFAULT 'MEXC',
-        api_key TEXT DEFAULT '',
-        api_secret TEXT DEFAULT '',
+        display_name TEXT NOT NULL,
         paper_trading INTEGER DEFAULT 1,
-        initial_capital REAL DEFAULT 500.0,
         trade_size_usdt REAL DEFAULT 10.0,
-        max_concurrent_per_coin INTEGER DEFAULT 5,
         stop_loss_pct REAL DEFAULT 0.0049,
-        daily_target_per_coin REAL DEFAULT 1.50,
-        daily_target_portfolio REAL DEFAULT 5.00,
         status TEXT DEFAULT 'RUNNING'
     )
     """)
 
-    # جدول تاريخ وسجل الصفقات المفتوحة والمغلقة
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS trade_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        bot_name TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        side TEXT NOT NULL,
-        entry_price REAL NOT NULL,
-        exit_price REAL,
-        qty REAL NOT NULL,
-        pnl REAL DEFAULT 0.0,
-        status TEXT DEFAULT 'OPEN',
-        entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        exit_time TIMESTAMP
-    )
-    """)
-
-    # حساب المدير الافتراضي: admin / admin123
+    # إنشاء مستخدم المدير الافتراضي (admin / admin123)
     default_pass = hashlib.sha256("admin123".encode('utf-8')).hexdigest()
-    cursor.execute("""
-    INSERT OR IGNORE INTO users (id, username, password_hash)
-    VALUES (1, 'admin', ?)
-    """, (default_pass,))
+    cursor.execute("INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'admin', ?)", (default_pass,))
 
-    # إعدادات افتراضية للبوت الأول (EWO Momentum) والبوت الثاني (RSI Scalper)
-    cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, exchange, paper_trading, trade_size_usdt, initial_capital, status)
-    VALUES (1, 'EWO_BOT', 'MEXC', 1, 10.0, 500.0, 'RUNNING')
-    """)
-    cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, exchange, paper_trading, trade_size_usdt, initial_capital, status)
-    VALUES (2, 'RSI_BOT', 'MEXC', 1, 10.0, 500.0, 'PAUSED')
-    """)
+    # إدخال سجل مفاتيح MEXC الافتراضي
+    cursor.execute("INSERT OR IGNORE INTO exchange_keys (id, api_key, api_secret) VALUES (1, '', '')")
+
+    # تهيئة البوتات الثلاثة
+    cursor.execute("INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, paper_trading, trade_size_usdt, status) VALUES (1, 'BOT_1', '🤖 EWO Momentum Bot', 1, 10.0, 'RUNNING')")
+    cursor.execute("INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, paper_trading, trade_size_usdt, status) VALUES (2, 'BOT_2', '⚡ Bot 2 (قريباً)', 1, 10.0, 'PAUSED')")
+    cursor.execute("INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, paper_trading, trade_size_usdt, status) VALUES (3, 'BOT_3', '📈 Bot 3 (قريباً)', 1, 10.0, 'PAUSED')")
 
     conn.commit()
     conn.close()
 
+def get_keys():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT api_key, api_secret FROM exchange_keys WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else {"api_key": "", "api_secret": ""}
+
+def save_keys(api_key, api_secret):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE exchange_keys SET api_key = ?, api_secret = ? WHERE id = 1", (api_key.strip(), api_secret.strip()))
+    conn.commit()
+    conn.close()
+
 def get_bot_config(bot_name):
-    """جلب إعدادات بوت محدد"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -84,7 +79,6 @@ def get_bot_config(bot_name):
     return dict(row) if row else {}
 
 def update_bot_config(bot_name, updates):
-    """تحديث إعدادات البوت في قاعدة البيانات"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     fields = [f"{k} = ?" for k in updates.keys()]
@@ -95,7 +89,6 @@ def update_bot_config(bot_name, updates):
     conn.close()
 
 def verify_user(username, password):
-    """التحقق من بيانات تسجيل الدخول"""
     pass_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
