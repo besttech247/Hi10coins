@@ -37,7 +37,7 @@ def init_db():
         sl_pct REAL DEFAULT 0.005,
         trailing_stop INTEGER DEFAULT 0,
         trailing_cb REAL DEFAULT 0.003,
-        status TEXT DEFAULT 'RUNNING'
+        status TEXT DEFAULT 'PAUSED'
     )
     """)
 
@@ -59,21 +59,24 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'admin', ?)", (default_pass,))
     cursor.execute("INSERT OR IGNORE INTO exchange_keys (id, api_key, api_secret) VALUES (1, '', '')")
 
-    default_symbols = "NEARUSDT, AVAXUSDT, SOLUSDT, DOGEUSDT, BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, ADAUSDT, LINKUSDT"
+    # تهيئة البوتات الثلاثة بالحالة الافتراضية PAUSED
+    default_symbols_b1_b2 = "NEARUSDT, AVAXUSDT, SOLUSDT, DOGEUSDT, BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, ADAUSDT, LINKUSDT"
+    default_symbols_b3 = "BTCUSDT, ETHUSDT"  # عملتين فقط لـ Bot 3
+
     cursor.execute("""
     INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', ?, 100.0, 3, 10.0, '5m', 0.015, 0.0049, 0, 'RUNNING')
-    """, (default_symbols,))
+    VALUES (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', ?, 100.0, 3, 10.0, '5m', 0.015, 0.0049, 0, 'PAUSED')
+    """, (default_symbols_b1_b2,))
     
     cursor.execute("""
     INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
     VALUES (2, 'BOT_2', '⚡ Bot 2 (EWO Custom TF)', ?, 100.0, 3, 10.0, '15m', 0.02, 0.006, 0, 'PAUSED')
-    """, (default_symbols,))
+    """, (default_symbols_b1_b2,))
 
     cursor.execute("""
     INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (3, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Auto Bracket)', ?, 100.0, 3, 10.0, '1m', 0.015, 0.005, 1, 'RUNNING')
-    """, (default_symbols,))
+    VALUES (3, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Auto Bracket)', ?, 100.0, 3, 10.0, '1m', 0.015, 0.005, 1, 'PAUSED')
+    """, (default_symbols_b3,))
 
     conn.commit()
     conn.close()
