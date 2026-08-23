@@ -41,7 +41,6 @@ def init_db():
     )
     """)
 
-    # جدول الصفقات المفتوحة الدائم
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS active_trades (
         id TEXT PRIMARY KEY,
@@ -114,7 +113,6 @@ def update_bot_config(bot_name, updates):
     conn.commit()
     conn.close()
 
-# دوال الصفقات المفتوحة الدائمة
 def load_all_active_trades():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
