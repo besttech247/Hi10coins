@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>التداول اليدوي المباشر</title>
+<style>
+:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--text);padding:12px;line-height:1.5}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px}
+.btn{padding:8px 12px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:12px}
+input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:12px;width:100%}
+.pct-btn{background:#151e30;border:1px solid var(--border);color:var(--sub);padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px}
+.pct-btn:hover{background:#3b82f6;color:#fff}
+</style>
+</head>
+<body>
+  <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <strong>📊 مركز التداول الفوري اليدوي</strong>
+      <div style="font-size:11px;color:var(--sub)">USDT المتاح: <strong id="m-usdt" style="color:#10b981">0.00 $</strong></div>
+    </div>
+    <a href="/" class="btn" style="background:#334155;color:#fff;text-decoration:none">🔙 الرئيسية</a>
+  </div>
+
+  <details open class="card">
+    <summary style="font-weight:bold;cursor:pointer;color:#38bdf8;padding:4px">⚡ لوحة الشراء والبيع اليدوي ▾</summary>
+    <div style="padding-top:10px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div>
+          <label style="font-size:11px;color:var(--sub)">رمز العملة:</label>
+          <input type="text" id="t-sym" placeholder="مثال: SOLUSDT" value="SOLUSDT" oninput="fetchLivePrice()">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--sub)">السعر اللحظي الحالي:</label>
+          <div id="live-ticker-price" style="background:#090d16;border:1px solid var(--border);padding:8px;border-radius:6px;font-weight:bold;color:#38bdf8">جاري الجلب...</div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div>
+          <label style="font-size:11px;color:var(--sub)">نوع الأمر:</label>
+          <select id="t-type" onchange="toggleLimitPrice()">
+            <option value="MARKET">سعر السوق (Market)</option>
+            <option value="LIMIT">أمر معلق (Limit)</option>
+          </select>
+        </div>
+        <div id="limit-price-box" style="display:none">
+          <label style="font-size:11px;color:var(--sub)">سعر التنفيذ المطلوب ($):</label>
+          <input type="number" id="t-price" placeholder="أدخل السعر">
+        </div>
+      </div>
+
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <label style="font-size:11px;color:var(--sub)">القيمة بـ USDT أو الكمية:</label>
+          <div style="display:flex;gap:4px">
+            <button class="pct-btn" onclick="setPct(0.25)">25%</button>
+            <button class="pct-btn" onclick="setPct(0.50)">50%</button>
+            <button class="pct-btn" onclick="setPct(0.75)">75%</button>
+            <button class="pct-btn" onclick="setPct(1.00)">100%</button>
+          </div>
+        </div>
+        <input type="number" id="t-qty" placeholder="القيمة بالدولار أو كمية العملة">
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button class="btn" style="background:#10b981;color:#fff" onclick="execTrade('BUY')">🟢 تنفيذ شراء</button>
+        <button class="btn" style="background:#ef4444;color:#fff" onclick="execTrade('SELL')">🔴 تنفيذ بيع</button>
+      </div>
+    </div>
+  </details>
+
+<script>
+let freeUsdt = 0;
+async function loadBal(){
+  const r = await fetch('/api/data');
+  const d = await r.json();
+  freeUsdt = d.real_balance_usdt || 0;
+  document.getElementById('m-usdt').innerText = freeUsdt.toFixed(2) + ' $';
+}
+loadBal(); setInterval(loadBal, 3000);
+
+async function fetchLivePrice(){
+  const sym = document.getElementById('t-sym').value.trim().toUpperCase();
+  if(!sym) return;
+  const targetSym = sym.endsWith('USDT') ? sym : sym + 'USDT';
+  try {
+    const r = await fetch('/api/data');
+    const d = await r.json();
+    if(d.market_prices && d.market_prices[targetSym]){
+      const p = d.market_prices[targetSym].ask || d.market_prices[targetSym].bid;
+      document.getElementById('live-ticker-price').innerText = p ? p + ' $' : 'غير متوفر';
+    }
+  } catch(e){}
+}
+setInterval(fetchLivePrice, 2500);
+
+function toggleLimitPrice(){
+  const t = document.getElementById('t-type').value;
+  document.getElementById('limit-price-box').style.display = t === 'LIMIT' ? 'block' : 'none';
+}
+function setPct(p){
+  document.getElementById('t-qty').value = (freeUsdt * p).toFixed(2);
+}
+async function execTrade(side){
+  const sym = document.getElementById('t-sym').value.trim().toUpperCase();
+  const type = document.getElementById('t-type').value;
+  const val = parseFloat(document.getElementById('t-qty').value);
+  const price = parseFloat(document.getElementById('t-price').value);
+
+  if(!sym || !val){ alert('يرجى ملء رمز العملة والقيمة'); return; }
+  if(type === 'LIMIT' && (!price || price <= 0)){ alert('يرجى تحديد سعر الأمر'); return; }
+
+  const payload = {
+    symbol: sym.endsWith('USDT') ? sym : sym + 'USDT',
+    side: side,
+    order_type: type,
+    val: val,
+    price: price
+  };
+
+  if(confirm(`تأكيد تنفيذ أمر ${side} لـ ${payload.symbol} بقيمة/كمية ${val}؟`)){
+    const r = await fetch('/api/terminal_trade', {method:'POST', body:JSON.stringify(payload)});
+    const d = await r.json();
+    alert(d.msg);
+    loadBal();
+  }
+}
+</script>
+</body>
+</html>
