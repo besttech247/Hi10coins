@@ -96,22 +96,25 @@ shared_state = {
 }
 
 def init_trades_from_db():
-    rows = database.load_all_active_trades()
-    for r in rows:
-        bKey = r["bot_name"]
-        sym = r["symbol"]
-        if bKey in shared_state["bots"]:
-            if sym not in shared_state["bots"][bKey]["active_positions"]:
-                shared_state["bots"][bKey]["active_positions"][sym] = []
-            shared_state["bots"][bKey]["active_positions"][sym].append({
-                "id": r["id"],
-                "entry_price": r["entry_price"],
-                "highest_price": r["highest_price"],
-                "qty": r["qty"],
-                "tp_pct": r.get("tp_pct", 0.015),
-                "sl_pct": r.get("sl_pct", 0.005),
-                "time": r["time_str"]
-            })
+    try:
+        rows = database.load_all_active_trades()
+        for r in rows:
+            bKey = r.get("bot_name")
+            sym = r.get("symbol")
+            if bKey in shared_state["bots"]:
+                if sym not in shared_state["bots"][bKey]["active_positions"]:
+                    shared_state["bots"][bKey]["active_positions"][sym] = []
+                shared_state["bots"][bKey]["active_positions"][sym].append({
+                    "id": r.get("id"),
+                    "entry_price": float(r.get("entry_price", 0.0)),
+                    "highest_price": float(r.get("highest_price", r.get("entry_price", 0.0))),
+                    "qty": float(r.get("qty", 0.0)),
+                    "tp_pct": float(r.get("tp_pct", 0.015)),
+                    "sl_pct": float(r.get("sl_pct", 0.005)),
+                    "time": r.get("time_str", "--:--")
+                })
+    except Exception:
+        pass
 
 def add_log(msg, category="system", log_type="info"):
     timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -410,7 +413,7 @@ def trading_engine_loop():
 
                                         if float(format_quantity(sym, sell_qty)) <= 0:
                                             database.delete_active_trade(pos['id'])
-                                            add_log(f"⚠️ رصيد {sym} غير متاح في المحفظة، حذفت الصفقة", "system", "warning")
+                                            add_log(f"⚠️ رصيد {sym} غير متاح، حذفت الصفقة", "system", "warning")
                                             continue
 
                                         ok, res = place_order(sym, "SELL", qty=sell_qty)
@@ -425,7 +428,7 @@ def trading_engine_loop():
                                         else:
                                             if "30005" in str(res) or "Oversold" in str(res):
                                                 database.delete_active_trade(pos['id'])
-                                                add_log(f"⚠️ Oversold لـ {sym}، أزيلت من الذاكرة", "system", "warning")
+                                                add_log(f"⚠️ Oversold لـ {sym}، أزيلت", "system", "warning")
                                             else:
                                                 still_pos.append(pos)
                                     else:
@@ -508,7 +511,7 @@ def trading_engine_loop():
                                 else:
                                     if "30005" in str(res) or "Oversold" in str(res):
                                         database.delete_active_trade(pos['id'])
-                                        add_log(f"⚠️ Oversold لـ {sym}، أزيلت من الذاكرة", "system", "warning")
+                                        add_log(f"⚠️ Oversold لـ {sym}، أزيلت", "system", "warning")
                                     else:
                                         still_b3.append(pos)
                             else:
@@ -521,7 +524,776 @@ def trading_engine_loop():
         time.sleep(7)
 
 # =====================================================================
-# 🌐 واجهات HTML ومعالجة المسارات
+# 🌐 قوالب HTML
+# =====================================================================
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>دخول - Command Hub</title>
+<style>
+body{background:#090d16;color:#f3f4f6;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.box{background:#111827;padding:24px;border-radius:12px;width:320px;border:1px solid #1f293d}
+input{width:100%;padding:10px;margin:8px 0;background:#090d16;border:1px solid #1f293d;color:#fff;border-radius:6px;box-sizing:border-box}
+button{width:100%;padding:10px;background:#3b82f6;color:#fff;border:none;border-radius:6px;font-weight:bold;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="box">
+  <h3 style="text-align:center;margin-bottom:12px">🔐 تسجيل الدخول</h3>
+  <form id="f">
+    <input type="text" id="u" placeholder="اسم المستخدم" required>
+    <input type="password" id="p" placeholder="كلمة المرور" required>
+    <button type="submit">دخول</button>
+  </form>
+</div>
+<script>
+document.getElementById('f').onsubmit=async(e)=>{
+  e.preventDefault();
+  const r=await fetch('/api/login',{method:'POST',body:JSON.stringify({username:u.value,password:p.value})});
+  if(r.ok) location.href='/'; else alert('بيانات الدخول غير صحيحة');
+};
+</script>
+</body>
+</html>"""
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>MEXC Multi-Bot Hub</title>
+<style>
+:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--text);padding:12px;line-height:1.5}
+.header-box{display:flex;justify-content:space-between;align-items:center;padding:12px;background:var(--card);border-radius:12px;border:1px solid var(--border);margin-bottom:12px;flex-wrap:wrap;gap:10px}
+.wallet-bar{display:flex;gap:12px;align-items:center;background:#151e30;padding:6px 12px;border-radius:8px;border:1px solid var(--border)}
+.tabs{display:flex;gap:6px;margin:10px 0;overflow-x:auto}
+.tab{padding:8px 12px;background:#151e30;border:1px solid var(--border);border-radius:8px;color:var(--sub);cursor:pointer;font-weight:bold;white-space:nowrap}
+.tab.active{background:var(--primary);color:#fff}
+.tab-pane{display:none}
+.tab-pane.active{display:block}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:10px}
+.card-title{font-size:11px;color:var(--sub);margin-bottom:2px}
+.card-val{font-size:20px;font-weight:bold}
+.progress-bar{height:5px;background:#1f293d;border-radius:3px;margin-top:6px;overflow:hidden}
+.progress-fill{height:100%;background:var(--primary);transition:width .4s}
+.btn{padding:5px 8px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:12px;display:inline-flex;align-items:center;justify-content:center;gap:4px}
+.icon-btn{padding:4px 8px;font-size:14px;border-radius:6px;border:none;cursor:pointer}
+table{width:100%;border-collapse:collapse;text-align:right}
+th,td{padding:7px 8px;border-bottom:1px solid var(--border);font-size:12px}
+th{color:var(--sub)}
+.badge{padding:2px 6px;border-radius:4px;font-size:11px;font-weight:bold}
+.badge-active{background:#10b98122;color:var(--success)}
+.badge-idle{background:#64748b22;color:var(--sub)}
+.logs{max-height:200px;overflow-y:auto;font-family:monospace;font-size:11px;background:#090d16;padding:8px;border-radius:8px;border:1px solid var(--border)}
+.log-item{padding:3px 0;border-bottom:1px solid #1f293d44;display:flex;gap:6px}
+input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;width:100%}
+details{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden}
+summary{padding:8px 12px;cursor:pointer;font-weight:bold;background:#151e30}
+.form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;padding:10px}
+.manage-ctrl{display:none}
+.manage-mode .manage-ctrl{display:inline-flex}
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:#00000088;display:none;align-items:center;justify-content:center;z-index:99}
+.modal{background:#111827;border:1px solid var(--border);padding:16px;border-radius:12px;width:300px}
+</style>
+</head>
+<body>
+  <div class="header-box">
+    <div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <strong>🎛️ MEXC Multi-Bot Hub</strong>
+        <a href="/analytics" style="color:#60a5fa;font-size:12px;text-decoration:none;background:#1e293b;padding:2px 8px;border-radius:6px">📊 التداول اليدوي ↗</a>
+      </div>
+      <div style="font-size:11px;color:var(--sub);margin-top:2px">⏳ <span id="uptime" style="color:#60a5fa;font-weight:bold">00:00:00</span></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div class="wallet-bar">
+        <div><span style="font-size:11px;color:var(--sub)">USDT:</span> <strong id="live-usdt" style="color:#10b981;font-size:14px">0.00 $</strong></div>
+        <div style="border-right:1px solid var(--border);padding-right:8px"><span style="font-size:11px;color:var(--sub)">الإجمالي:</span> <strong id="live-total-usd" style="color:#38bdf8;font-size:14px">0.00 $</strong></div>
+      </div>
+      <span id="api-stat" style="font-size:12px">جاري الفحص...</span>
+      <button class="icon-btn" style="background:#334155;color:#fff" title="تسجيل الخروج" onclick="fetch('/api/logout').then(()=>location.href='/login')">🚪</button>
+    </div>
+  </div>
+
+  <details id="keys-box" class="card">
+    <summary style="color:#60a5fa">🔑 الإعدادات و IP السيرفر ▾ <span id="keys-status-badge"></span></summary>
+    <div style="padding:10px">
+      <div style="background:#090d16;padding:6px 10px;border-radius:6px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:11px;color:var(--sub)">🌐 IP السيرفر: <strong id="server-ip-val" style="color:#38bdf8;font-family:monospace">جاري الجلب...</strong></span>
+        <button class="btn" style="background:#0284c7;color:#fff;font-size:11px" onclick="copyServerIP()">📋 نسخ IP</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
+        <input type="password" id="m-key" placeholder="MEXC API Key">
+        <input type="password" id="m-sec" placeholder="MEXC API Secret">
+      </div>
+      <button class="btn" style="background:var(--primary);color:#fff;width:100%;margin-bottom:8px" onclick="saveKeys()">💾 حفظ المفاتيح في SQLite</button>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:6px">
+        <input type="password" id="new-pass" placeholder="كلمة المرور الجديدة">
+        <button class="btn" style="background:#10b981;color:#fff" onclick="changePass()">تحديث 🔒</button>
+      </div>
+    </div>
+  </details>
+
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('t1', this)">🤖 Bot 1</button>
+    <button class="tab" onclick="showTab('t2', this)">⚡ Bot 2</button>
+    <button class="tab" onclick="showTab('t3', this)">🎯 Bot 3</button>
+    <button class="tab" onclick="showTab('t4', this)">💰 المحفظة</button>
+  </div>
+
+  <!-- Bot 1 -->
+  <div id="t1" class="tab-pane active">
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+      <span>حالة Bot 1: <strong id="b1-st" style="color:#f59e0b">PAUSED</strong></span>
+      <div style="display:flex;gap:4px">
+        <button class="icon-btn" style="background:var(--success);color:#fff" title="تشغيل" onclick="setSt('BOT_1','RUNNING')">▶️</button>
+        <button class="icon-btn" style="background:#f59e0b;color:#000" title="إيقاف مؤقت" onclick="setSt('BOT_1','PAUSED')">⏸️</button>
+        <button class="icon-btn" style="background:var(--danger);color:#fff" title="إيقاف تام" onclick="setSt('BOT_1','STOPPED')">⏹️</button>
+      </div>
+    </div>
+    
+    <div class="grid">
+      <div class="card"><div class="card-title">أرباح اليوم</div><div class="card-val" id="b1-pnl">+0.00$</div><div class="progress-bar"><div class="progress-fill" id="b1-pnl-bar" style="width:0%"></div></div></div>
+      <div class="card"><div class="card-title">نسبة الفوز</div><div class="card-val" id="b1-winrate">0.0%</div><div style="font-size:10px;color:var(--sub)" id="b1-trade-stats">0 صفقات</div></div>
+      <div class="card"><div class="card-title">السيولة المفتوحة</div><div class="card-val" id="b1-cap-used">0$</div><div style="font-size:10px;color:var(--sub)" id="b1-alloc-text">سقف: 100$</div></div>
+    </div>
+
+    <details class="card">
+      <summary style="color:#a78bfa">⚙️ سقف رأس المال والصفقات (Bot 1)</summary>
+      <div class="form-row" style="padding-top:10px">
+        <div><label style="font-size:11px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="b1-alloc" value="100"></div>
+        <div><label style="font-size:11px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="b1-maxcon" value="3"></div>
+        <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="b1-size" value="10"></div>
+        <div><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="b1-sl" value="0.49" step="0.01"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('BOT_1', 'b1')">💾 حفظ الإعدادات</button></div>
+      </div>
+    </details>
+
+    <details class="card" id="b1-coins-card" open>
+      <summary style="display:flex;justify-content:space-between;align-items:center">
+        <span>📊 جدول العملات وأرباح اليوم</span>
+        <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
+          <button class="btn manage-ctrl" style="background:#10b981;color:#fff;font-size:11px;padding:2px 6px" onclick="addCoinToBot('BOT_1')">➕ إضافة</button>
+          <button class="icon-btn" style="background:#334155;color:#fff;font-size:12px" title="وضع الإدارة" onclick="toggleManage('b1-coins-card')">⚙️</button>
+        </div>
+      </summary>
+      <div style="overflow-x:auto;padding-top:8px"><table id="b1-coins-table"><thead><tr><th>العملة</th><th>السعر</th><th>ربح اليوم</th><th>الصفقات</th><th>دخول</th><th>حذف</th></tr></thead><tbody></tbody></table></div>
+    </details>
+
+    <details class="card" id="b1-orders-card" open>
+      <summary style="display:flex;justify-content:space-between;align-items:center">
+        <span>📂 صفقات Bot 1 المفتوحة (Live PnL & Persistence)</span>
+        <button class="icon-btn" style="background:#334155;color:#fff;font-size:12px" title="وضع الإدارة" onclick="toggleManage('b1-orders-card'); event.stopPropagation();">⚙️</button>
+      </summary>
+      <div style="overflow-x:auto;padding-top:8px"><table id="b1-orders"><thead><tr><th>العملة</th><th>الدخول</th><th>الكمية</th><th>Live PnL</th><th>الوقت</th><th>إجراءات</th></tr></thead><tbody></tbody></table></div>
+    </details>
+  </div>
+
+  <!-- Bot 2 -->
+  <div id="t2" class="tab-pane">
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+      <span>حالة Bot 2: <strong id="b2-st" style="color:#f59e0b">PAUSED</strong></span>
+      <div style="display:flex;gap:4px">
+        <button class="icon-btn" style="background:var(--success);color:#fff" title="تشغيل" onclick="setSt('BOT_2','RUNNING')">▶️</button>
+        <button class="icon-btn" style="background:#f59e0b;color:#000" title="إيقاف مؤقت" onclick="setSt('BOT_2','PAUSED')">⏸️</button>
+        <button class="icon-btn" style="background:var(--danger);color:#fff" title="إيقاف تام" onclick="setSt('BOT_2','STOPPED')">⏹️</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="card-title">أرباح اليوم</div><div class="card-val" id="b2-pnl">+0.00$</div><div class="progress-bar"><div class="progress-fill" id="b2-pnl-bar" style="width:0%"></div></div></div>
+      <div class="card"><div class="card-title">نسبة الفوز</div><div class="card-val" id="b2-winrate">0.0%</div><div style="font-size:10px;color:var(--sub)" id="b2-trade-stats">0 صفقات</div></div>
+      <div class="card"><div class="card-title">السيولة المفتوحة</div><div class="card-val" id="b2-cap-used">0$</div><div style="font-size:10px;color:var(--sub)" id="b2-alloc-text">سقف: 100$</div></div>
+    </div>
+
+    <details class="card">
+      <summary style="color:#a78bfa">⚙️ الفريم وسقف رأس المال (Bot 2)</summary>
+      <div class="form-row" style="padding-top:10px">
+        <div><label style="font-size:11px;color:var(--sub)">الفريم الزمني</label><select id="b2-tf"><option value="1m">1m</option><option value="5m">5m</option><option value="15m" selected>15m</option><option value="30m">30m</option><option value="60m">1h</option><option value="4h">4h</option></select></div>
+        <div><label style="font-size:11px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="b2-alloc" value="100"></div>
+        <div><label style="font-size:11px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="b2-maxcon" value="3"></div>
+        <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="b2-size" value="10"></div>
+        <div><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="b2-sl" value="0.6" step="0.01"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('BOT_2', 'b2')">💾 حفظ</button></div>
+      </div>
+    </details>
+
+    <details class="card" id="b2-coins-card" open>
+      <summary style="display:flex;justify-content:space-between;align-items:center">
+        <span>📊 جدول العملات وأرباح اليوم</span>
+        <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
+          <button class="btn manage-ctrl" style="background:#10b981;color:#fff;font-size:11px;padding:2px 6px" onclick="addCoinToBot('BOT_2')">➕ إضافة</button>
+          <button class="icon-btn" style="background:#334155;color:#fff;font-size:12px" title="وضع الإدارة" onclick="toggleManage('b2-coins-card')">⚙️</button>
+        </div>
+      </summary>
+      <div style="overflow-x:auto;padding-top:8px"><table id="b2-coins-table"><thead><tr><th>العملة</th><th>السعر</th><th>ربح اليوم</th><th>الصفقات</th><th>دخول</th><th>حذف</th></tr></thead><tbody></tbody></table></div>
+    </details>
+
+    <details class="card" id="b2-orders-card" open>
+      <summary style="display:flex;justify-content:space-between;align-items:center">
+        <span>📂 صفقات Bot 2 المفتوحة (Live PnL & Persistence)</span>
+        <button class="icon-btn" style="background:#334155;color:#fff;font-size:12px" title="وضع الإدارة" onclick="toggleManage('b2-orders-card'); event.stopPropagation();">⚙️</button>
+      </summary>
+      <div style="overflow-x:auto;padding-top:8px"><table id="b2-orders"><thead><tr><th>العملة</th><th>الدخول</th><th>الكمية</th><th>Live PnL</th><th>الوقت</th><th>إجراءات</th></tr></thead><tbody></tbody></table></div>
+    </details>
+  </div>
+
+  <!-- Bot 3 -->
+  <div id="t3" class="tab-pane">
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+      <span>حالة Bot 3: <strong id="b3-st" style="color:#f59e0b">PAUSED</strong></span>
+      <div style="display:flex;gap:4px">
+        <button class="icon-btn" style="background:var(--success);color:#fff" title="تشغيل" onclick="setSt('BOT_3','RUNNING')">▶️</button>
+        <button class="icon-btn" style="background:#f59e0b;color:#000" title="إيقاف مؤقت" onclick="setSt('BOT_3','PAUSED')">⏸️</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card"><div class="card-title">أرباح اليوم</div><div class="card-val" id="b3-pnl">+0.00$</div><div class="progress-bar"><div class="progress-fill" id="b3-pnl-bar" style="width:0%"></div></div></div>
+      <div class="card"><div class="card-title">نسبة الفوز</div><div class="card-val" id="b3-winrate">0.0%</div><div style="font-size:10px;color:var(--sub)" id="b3-trade-stats">0 صفقات</div></div>
+      <div class="card"><div class="card-title">السيولة المفتوحة</div><div class="card-val" id="b3-cap-used">0$</div><div style="font-size:10px;color:var(--sub)" id="b3-alloc-text">سقف: 100$</div></div>
+    </div>
+
+    <details class="card" open>
+      <summary style="color:#38bdf8">🎯 إعدادات الدخول اليدوي والـ Trailing Stop</summary>
+      <div class="form-row" style="padding-top:10px">
+        <div><label style="font-size:11px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="b3-alloc" value="100"></div>
+        <div><label style="font-size:11px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="b3-size" value="10"></div>
+        <div><label style="font-size:11px;color:var(--sub)">جني الأرباح (TP %)</label><input type="number" id="b3-tp" value="1.5" step="0.1"></div>
+        <div><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="b3-sl" value="0.5" step="0.1"></div>
+        <div><label style="font-size:11px;color:var(--sub)">Trailing Stop</label><select id="b3-ts"><option value="1">مفعّل ✅</option><option value="0">معطّل ❌</option></select></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('BOT_3', 'b3')">💾 حفظ</button></div>
+      </div>
+    </details>
+
+    <details class="card" id="b3-coins-card" open>
+      <summary style="display:flex;justify-content:space-between;align-items:center">
+        <span>⚡ عملات التداول السريع</span>
+        <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
+          <button class="btn manage-ctrl" style="background:#10b981;color:#fff;font-size:11px;padding:2px 6px" onclick="addCoinToBot('BOT_3')">➕ إضافة</button>
+          <button class="icon-btn" style="background:#334155;color:#fff;font-size:12px" title="وضع الإدارة" onclick="toggleManage('b3-coins-card')">⚙️</button>
+        </div>
+      </summary>
+      <div style="overflow-x:auto;padding-top:8px"><table id="b3-market-table"><thead><tr><th>العملة</th><th>السعر</th><th>إطلاق بنقرة</th><th>حذف</th></tr></thead><tbody></tbody></table></div>
+    </details>
+
+    <details class="card" id="b3-orders-card" open>
+      <summary style="display:flex;justify-content:space-between;align-items:center">
+        <span>📂 صفقات Bot 3 المفتوحة (Live PnL & Persistence)</span>
+        <button class="icon-btn" style="background:#334155;color:#fff;font-size:12px" title="وضع الإدارة" onclick="toggleManage('b3-orders-card'); event.stopPropagation();">⚙️</button>
+      </summary>
+      <div style="overflow-x:auto;padding-top:8px"><table id="b3-orders"><thead><tr><th>العملة</th><th>الدخول</th><th>أعلى سعر</th><th>الكمية</th><th>Live PnL</th><th>الوقت</th><th>إجراءات</th></tr></thead><tbody></tbody></table></div>
+    </details>
+  </div>
+
+  <!-- Wallet & Pending Orders -->
+  <div id="t4" class="tab-pane">
+    <details class="card" id="wallet-card" open>
+      <summary style="display:flex;justify-content:space-between;align-items:center">
+        <span>💼 أرصدة المحفظة الفورية</span>
+        <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
+          <button class="btn" style="background:#0284c7;color:#fff;font-size:11px;padding:2px 6px" onclick="triggerUpdate()" title="تحديث الأرصدة والأسعار فوراً">🔄 تحديث</button>
+          <button class="btn manage-ctrl" style="background:#8b5cf6;color:#fff;font-size:11px;padding:2px 6px" onclick="convertDustDirect()">🔄 تحويل لـ MX</button>
+          <button class="btn manage-ctrl" style="background:var(--danger);color:#fff;font-size:11px;padding:2px 6px" onclick="panicSellAll()">🔥 تسييل الكل</button>
+          <button class="icon-btn" style="background:#334155;color:#fff;font-size:12px" title="وضع الإدارة" onclick="toggleManage('wallet-card')">⚙️</button>
+        </div>
+      </summary>
+      <div style="overflow-x:auto;padding-top:8px">
+        <table id="w-table">
+          <thead><tr><th>العملة</th><th>المتاح</th><th>المحجوز</th><th>السعر</th><th>القيمة ($)</th><th>تسييل</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="card" id="pending-card" open>
+      <summary style="display:flex;justify-content:space-between;align-items:center">
+        <span>⏳ الأوامر المعلقة في المنصة (Limit Orders)</span>
+        <button class="icon-btn" style="background:#334155;color:#fff;font-size:12px" title="وضع الإدارة" onclick="toggleManage('pending-card'); event.stopPropagation();">⚙️</button>
+      </summary>
+      <div style="overflow-x:auto;padding-top:8px">
+        <table id="limit-orders-table">
+          <thead><tr><th>العملة</th><th>النوع</th><th>السعر</th><th>الكمية</th><th>الوقت</th><th>إلغاء</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </details>
+  </div>
+
+  <!-- Modal تعديل الصفقة -->
+  <div class="modal-overlay" id="edit-modal">
+    <div class="modal">
+      <h4 style="margin-bottom:8px">✏️ تعديل الصفقة</h4>
+      <input type="hidden" id="edit-pos-id">
+      <div style="margin-bottom:6px"><label style="font-size:11px;color:var(--sub)">سعر الدخول ($):</label><input type="number" id="edit-entry" step="any"></div>
+      <div style="margin-bottom:6px"><label style="font-size:11px;color:var(--sub)">الكمية:</label><input type="number" id="edit-qty" step="any"></div>
+      <div style="margin-bottom:6px"><label style="font-size:11px;color:var(--sub)">جني الأرباح (TP %):</label><input type="number" id="edit-tp" step="0.1"></div>
+      <div style="margin-bottom:8px"><label style="font-size:11px;color:var(--sub)">وقف الخسارة (SL %):</label><input type="number" id="edit-sl" step="0.1"></div>
+      <div style="display:flex;gap:6px">
+        <button class="btn" style="background:#10b981;color:#fff;width:100%" onclick="saveEditedPos()">💾 حفظ</button>
+        <button class="btn" style="background:#334155;color:#fff;width:100%" onclick="closeEditModal()">إلغاء</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <details class="card">
+    <summary style="display:flex;justify-content:space-between;align-items:center">
+      <span>📜 السجل المباشر للعمليات</span>
+      <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
+        <input type="text" id="log-search" placeholder="🔍 بحث..." style="width:110px;padding:2px 6px;font-size:11px" oninput="renderLogs()">
+        <button class="icon-btn" style="background:#334155;color:#fff" title="نسخ" onclick="copyLogs()">📋</button>
+      </div>
+    </summary>
+    <div style="padding-top:8px">
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
+        <button class="btn" style="background:#151e30;color:var(--sub);font-size:10px" onclick="setLogFilter('all', this)">الكل</button>
+        <button class="btn" style="background:#151e30;color:var(--sub);font-size:10px" onclick="setLogFilter('signals', this)">🎯 إشارات</button>
+        <button class="btn" style="background:#151e30;color:var(--sub);font-size:10px" onclick="setLogFilter('buys', this)">🚀 شراء</button>
+        <button class="btn" style="background:#151e30;color:var(--sub);font-size:10px" onclick="setLogFilter('sells', this)">💰 بيع</button>
+        <button class="btn" style="background:#151e30;color:var(--sub);font-size:10px" onclick="setLogFilter('orders', this)">📤 أوامر</button>
+      </div>
+      <div class="logs" id="logs"></div>
+    </div>
+  </details>
+
+<script>
+let rawLogs = [];
+let logsText = "";
+let currentLogFilter = "all";
+let startTs = Date.now();
+let keysLoaded = false;
+let currentPublicIP = "";
+let initialConfigsPopulated = false;
+
+function showTab(id, btn){
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  btn.classList.add('active');
+}
+function setLogFilter(cat, btn){
+  currentLogFilter = cat;
+  renderLogs();
+}
+function copyLogs(){
+  navigator.clipboard.writeText(logsText).then(()=>alert("✅ تم نسخ السجلات!"));
+}
+function copyServerIP(){
+  if(currentPublicIP && currentPublicIP !== "جاري الجلب..."){
+    navigator.clipboard.writeText(currentPublicIP).then(()=>alert("✅ تم نسخ IP السيرفر: " + currentPublicIP));
+  }
+}
+function toggleManage(cardId){
+  const el = document.getElementById(cardId);
+  if(el) el.classList.toggle('manage-mode');
+}
+function triggerUpdate(){
+  update();
+  alert("🔄 جاري تحديث المحفظة والأسعار من المنصة...");
+}
+async function setSt(b,s){
+  await fetch('/api/control',{method:'POST',body:JSON.stringify({bot_name:b,status:s})});
+  update();
+}
+async function saveKeys(){
+  let k = document.getElementById('m-key').value.replace(/\\s+/g, '');
+  let s = document.getElementById('m-sec').value.replace(/\\s+/g, '');
+  if(!k || !s){ alert("يرجى إدخال المفتاح والسر"); return; }
+  await fetch('/api/save_keys',{method:'POST',body:JSON.stringify({api_key:k, api_secret:s})});
+  alert('✅ تم حفظ مفاتيح MEXC في SQLite!');
+  update();
+}
+async function changePass(){
+  const p = document.getElementById('new-pass').value;
+  if(!p){ alert("أدخل كلمة المرور"); return; }
+  const res = await fetch('/api/change_password', {method:'POST', body:JSON.stringify({new_password:p})});
+  if(res.ok){ alert("✅ تم التغيير!"); document.getElementById('new-pass').value = ''; }
+}
+
+async function addCoinToBot(botName){
+  const coin = prompt(`أدخل رمز العملة المراد إضافتها لـ ${botName} (مثال: SOL أو SUI أو NEAR):`);
+  if(coin && coin.trim()){
+    const r = await fetch('/api/add_symbol', {
+      method: 'POST',
+      body: JSON.stringify({bot_name: botName, symbol: coin.trim().toUpperCase()})
+    });
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+
+async function removeCoinFromBot(botName, sym){
+  if(confirm(`⚠️ هل أنت متأكد من حذف العملة (${sym}) من قائمة تداول ${botName}؟`)){
+    const r = await fetch('/api/remove_symbol', {
+      method: 'POST',
+      body: JSON.stringify({bot_name: botName, symbol: sym})
+    });
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+
+async function saveBotCfg(botName, prefix){
+  const payload = {
+    bot_name: botName,
+    max_allocation_usdt: parseFloat(document.getElementById(prefix+'-alloc').value)||100,
+    trade_size_usdt: parseFloat(document.getElementById(prefix+'-size').value)||10
+  };
+  if(prefix==='b1' || prefix==='b2'){
+    payload.max_concurrent_per_coin = parseInt(document.getElementById(prefix+'-maxcon').value)||3;
+    payload.sl_pct = (parseFloat(document.getElementById(prefix+'-sl').value)||0.5) / 100.0;
+  }
+  if(prefix==='b2'){
+    payload.timeframe = document.getElementById('b2-tf').value;
+  }
+  if(prefix==='b3'){
+    payload.tp_pct = (parseFloat(document.getElementById(prefix+'-tp').value)||1.5) / 100.0;
+    payload.sl_pct = (parseFloat(document.getElementById(prefix+'-sl').value)||0.5) / 100.0;
+    payload.trailing_stop = parseInt(document.getElementById('b3-ts').value);
+  }
+  await fetch('/api/save_bot_config', {method:'POST', body:JSON.stringify(payload)});
+  alert(`✅ تم حفظ إعدادات ${botName} في قاعدة البيانات!`);
+  update();
+}
+async function triggerBuy(botName, sym){
+  if(confirm(`إطلاق شراء لـ ${sym} عبر ${botName}؟`)){
+    const r = await fetch('/api/manual_buy', {method:'POST', body:JSON.stringify({bot_name:botName, symbol:sym})});
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+async function closeSinglePos(botName, sym, posId){
+  if(confirm(`تسييل صفقة ${sym} فوري؟`)){
+    const r = await fetch('/api/close_position', {method:'POST', body:JSON.stringify({bot_name:botName, symbol:sym, pos_id:posId})});
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+async function unlinkPos(botName, sym, posId){
+  if(confirm(`⚠️ هل تريد إلغاء وإزالة الصفقة من البوت دون بيعها في المنصة؟`)){
+    const r = await fetch('/api/unlink_position', {method:'POST', body:JSON.stringify({bot_name:botName, symbol:sym, pos_id:posId})});
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+
+function openEditModal(posId, entry, qty, tp, sl){
+  document.getElementById('edit-pos-id').value = posId;
+  document.getElementById('edit-entry').value = entry;
+  document.getElementById('edit-qty').value = qty;
+  document.getElementById('edit-tp').value = ((tp||0.015)*100).toFixed(2);
+  document.getElementById('edit-sl').value = ((sl||0.005)*100).toFixed(2);
+  document.getElementById('edit-modal').style.display = 'flex';
+}
+function closeEditModal(){
+  document.getElementById('edit-modal').style.display = 'none';
+}
+async function saveEditedPos(){
+  const posId = document.getElementById('edit-pos-id').value;
+  const payload = {
+    pos_id: posId,
+    entry_price: parseFloat(document.getElementById('edit-entry').value),
+    qty: parseFloat(document.getElementById('edit-qty').value),
+    tp_pct: (parseFloat(document.getElementById('edit-tp').value)||1.5)/100.0,
+    sl_pct: (parseFloat(document.getElementById('edit-sl').value)||0.5)/100.0
+  };
+  await fetch('/api/edit_position', {method:'POST', body:JSON.stringify(payload)});
+  closeEditModal();
+  alert("✅ تم تعديل وحفظ بيانات الصفقة في SQLite!");
+  update();
+}
+
+async function cancelLimitOrder(sym, orderId){
+  if(confirm(`إلغاء الأمر المعلق ${orderId} لـ ${sym} في المنصة؟`)){
+    const r = await fetch('/api/cancel_order', {method:'POST', body:JSON.stringify({symbol:sym, order_id:orderId})});
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+
+async function convertDustDirect(){
+  if(confirm("تحويل كافة الأرصدة الصغيرة في المحفظة إلى MX؟")){
+    const r = await fetch('/api/convert_dust_direct', {method:'POST'});
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+
+async function panicMarket(asset){
+  if(confirm(`تسييل ${asset} بسعر السوق؟`)){
+    const r = await fetch('/api/panic',{method:'POST',body:JSON.stringify({asset:asset, order_type:'MARKET'})});
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+async function panicLimit(asset, curPrice){
+  const priceStr = prompt(`سعر أمر LIMIT لـ ${asset}:`, curPrice);
+  if(priceStr){
+    const limitPrice = parseFloat(priceStr);
+    if(limitPrice > 0){
+      const r = await fetch('/api/panic', {method:'POST', body:JSON.stringify({asset:asset, order_type:'LIMIT', price:limitPrice})});
+      const d = await r.json();
+      alert(d.msg);
+      update();
+    }
+  }
+}
+async function panicSellAll(){
+  if(confirm("⚠️ تسييل كل العملات لـ USDT؟")){
+    const r = await fetch('/api/panic_all', {method:'POST'});
+    const d = await r.json();
+    alert(d.msg);
+    update();
+  }
+}
+function updateUptime(){
+  const diff = Math.floor((Date.now() - startTs) / 1000);
+  const hrs = Math.floor(diff / 3600);
+  const mins = Math.floor((diff % 3600) / 60);
+  const secs = diff % 60;
+  document.getElementById('uptime').innerText = `${hrs}س ${mins}د ${secs}ث`;
+}
+setInterval(updateUptime, 1000);
+
+function renderLogs(){
+  const searchQ = (document.getElementById('log-search').value || '').toLowerCase();
+  let lHtml = '';
+  logsText = '';
+
+  rawLogs.forEach(l => {
+    const cat = l.cat || 'system';
+    const msgLower = (l.msg || '').toLowerCase();
+    if(currentLogFilter !== 'all' && cat !== currentLogFilter) return;
+    if(searchQ && !msgLower.includes(searchQ) && !cat.includes(searchQ)) return;
+
+    let typeColor = '#f3f4f6';
+    if(l.type === 'danger') typeColor = 'var(--danger)';
+    else if(l.type === 'success') typeColor = 'var(--success)';
+    else if(l.type === 'warning') typeColor = '#f59e0b';
+    else if(l.type === 'primary') typeColor = '#60a5fa';
+
+    lHtml += `<div class="log-item"><span style="color:var(--sub)">[${l.time}]</span> <span style="color:${typeColor}">${l.msg}</span></div>`;
+    logsText += `[${l.time}] ${l.msg}\\n`;
+  });
+  document.getElementById('logs').innerHTML = lHtml || '<div style="color:var(--sub);text-align:center">لا توجد أحداث</div>';
+}
+
+async function update(){
+  try{
+    const res = await fetch('/api/data');
+    if(res.status===401) { location.href='/login'; return; }
+    const d = await res.json();
+    
+    if(d.start_timestamp) startTs = d.start_timestamp * 1000;
+    if(d.server_public_ip){
+      currentPublicIP = d.server_public_ip;
+      document.getElementById('server-ip-val').innerText = d.server_public_ip;
+    }
+
+    document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + ' $';
+    document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0.0).toFixed(2) + ' $';
+    document.getElementById('api-stat').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 متصل</span>' : '<span style="color:var(--danger)">🔴 غير متصل</span>';
+
+    if(d.has_saved_keys){
+      document.getElementById('keys-status-badge').innerHTML = `<span style="color:var(--success);font-weight:bold">(${d.masked_key})</span>`;
+      if(!keysLoaded){
+        document.getElementById('m-key').placeholder = `محفوظ (${d.masked_key})`;
+        document.getElementById('m-sec').placeholder = "محفوظ (*********)";
+        keysLoaded = true;
+      }
+    }
+
+    if(!initialConfigsPopulated && d.bots){
+      ['BOT_1', 'BOT_2', 'BOT_3'].forEach(bKey => {
+        const pfx = bKey === 'BOT_1' ? 'b1' : (bKey === 'BOT_2' ? 'b2' : 'b3');
+        const b = d.bots[bKey];
+        if(b){
+          if(document.getElementById(pfx+'-alloc') && b.max_allocation) document.getElementById(pfx+'-alloc').value = b.max_allocation;
+          if(document.getElementById(pfx+'-size') && b.trade_size) document.getElementById(pfx+'-size').value = b.trade_size;
+          if(document.getElementById(pfx+'-maxcon') && b.max_concurrent) document.getElementById(pfx+'-maxcon').value = b.max_concurrent;
+          if(document.getElementById(pfx+'-sl') && b.sl_pct !== undefined) document.getElementById(pfx+'-sl').value = b.sl_pct;
+          if(document.getElementById(pfx+'-tf') && b.timeframe) document.getElementById(pfx+'-tf').value = b.timeframe;
+          if(document.getElementById(pfx+'-tp') && b.tp_pct !== undefined) document.getElementById(pfx+'-tp').value = b.tp_pct;
+          if(document.getElementById(pfx+'-ts') && b.trailing_stop !== undefined) document.getElementById(pfx+'-ts').value = b.trailing_stop;
+        }
+      });
+      initialConfigsPopulated = true;
+    }
+
+    ['BOT_1', 'BOT_2', 'BOT_3'].forEach(bKey => {
+      const pfx = bKey === 'BOT_1' ? 'b1' : (bKey === 'BOT_2' ? 'b2' : 'b3');
+      const bObj = d.bots[bKey];
+      if(!bObj) return;
+
+      const stEl = document.getElementById(pfx+'-st');
+      if(stEl){
+        stEl.innerText = bObj.status || 'PAUSED';
+        stEl.style.color = bObj.status === 'RUNNING' ? '#10b981' : (bObj.status === 'PAUSED' ? '#f59e0b' : '#ef4444');
+      }
+
+      const pnl = bObj.daily_pnl || 0.0;
+      const pnlEl = document.getElementById(pfx+'-pnl');
+      if(pnlEl){
+        pnlEl.innerText = (pnl >= 0 ? '+' : '') + pnl.toFixed(3) + '$';
+        pnlEl.style.color = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+      }
+      
+      const pct = Math.min(100, Math.max(0, (pnl / (bObj.daily_target || 5.0)) * 100));
+      const pnlBar = document.getElementById(pfx+'-pnl-bar');
+      if(pnlBar) pnlBar.style.width = pct + '%';
+
+      const totalT = bObj.trades_count || 0;
+      const winT = bObj.winning_count || 0;
+      const wr = totalT > 0 ? ((winT / totalT) * 100).toFixed(1) : '0.0';
+      const wrEl = document.getElementById(pfx+'-winrate');
+      if(wrEl) wrEl.innerText = wr + '%';
+      const statsEl = document.getElementById(pfx+'-trade-stats');
+      if(statsEl) statsEl.innerText = `${totalT} صفقات (${winT} رابحة)`;
+
+      let totalOpen = 0;
+      let coinsTableHtml = '';
+      (bObj.symbols || []).forEach(sym => {
+        const count = (bObj.active_positions && bObj.active_positions[sym]) ? bObj.active_positions[sym].length : 0;
+        totalOpen += count;
+        const coinPnl = (bObj.daily_pnl_coins && bObj.daily_pnl_coins[sym]) ? bObj.daily_pnl_coins[sym] : 0.0;
+        const price = (d.market_prices && d.market_prices[sym]) ? d.market_prices[sym].bid : 0.0;
+
+        coinsTableHtml += `<tr>
+          <td><strong>${sym}</strong></td>
+          <td>${price ? price.toFixed(4)+'$' : '-'}</td>
+          <td style="color:${coinPnl>=0?'var(--success)':'var(--danger)'};font-weight:bold">${(coinPnl>=0?'+':'')+coinPnl.toFixed(3)}$</td>
+          <td><span class="badge ${count>0?'badge-active':'badge-idle'}">${count}/${bObj.max_concurrent||3}</span></td>
+          <td><button class="icon-btn" style="background:var(--primary);color:#fff" title="شراء فوري" onclick="triggerBuy('${bKey}','${sym}')">⚡</button></td>
+          <td><button class="icon-btn manage-ctrl" style="background:#334155;color:#f87171" title="حذف من الجدول" onclick="removeCoinFromBot('${bKey}','${sym}')">🗑️</button></td>
+        </tr>`;
+      });
+
+      const coinsTable = document.getElementById(pfx+'-coins-table');
+      if(coinsTable){
+        coinsTable.querySelector('tbody').innerHTML = coinsTableHtml || '<tr><td colspan="6" style="text-align:center">لا توجد عملات مضافة</td></tr>';
+      }
+      
+      const usedUsd = totalOpen * (bObj.trade_size || 10);
+      const capEl = document.getElementById(pfx+'-cap-used');
+      if(capEl) capEl.innerText = usedUsd.toFixed(1) + '$';
+      const allocEl = document.getElementById(pfx+'-alloc-text');
+      if(allocEl) allocEl.innerText = `سقف: ${bObj.max_allocation||100}$`;
+
+      let posHtml = '';
+      if(bObj.active_positions){
+        for(let s in bObj.active_positions){
+          const curBid = (d.market_prices && d.market_prices[s]) ? d.market_prices[s].bid : 0.0;
+          (bObj.active_positions[s] || []).forEach(p=>{
+            const livePnlVal = curBid ? (curBid - p.entry_price) * p.qty : 0.0;
+            const livePnlPct = (curBid && p.entry_price > 0) ? ((curBid - p.entry_price) / p.entry_price) * 100.0 : 0.0;
+            const pnlColor = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
+            const highestCol = pfx === 'b3' ? `<td>${p.highest_price||p.entry_price}$</td>` : '';
+
+            posHtml += `<tr>
+              <td><strong>${s}</strong></td>
+              <td>${p.entry_price}$</td>
+              ${highestCol}
+              <td>${p.qty}</td>
+              <td style="color:${pnlColor};font-weight:bold">${livePnlVal>=0?'+':''}${livePnlVal.toFixed(3)}$ (${livePnlPct.toFixed(2)}%)</td>
+              <td>${p.time}</td>
+              <td>
+                <div style="display:flex;gap:3px">
+                  <button class="icon-btn manage-ctrl" style="background:var(--danger);color:#fff" title="تسييل فوري" onclick="closeSinglePos('${bKey}','${s}', '${p.id}')">🔥</button>
+                  <button class="icon-btn manage-ctrl" style="background:#3b82f6;color:#fff" title="تعديل الصفقة" onclick="openEditModal('${p.id}', ${p.entry_price}, ${p.qty}, ${p.tp_pct||0.015}, ${p.sl_pct||0.005})">✏️</button>
+                  <button class="icon-btn manage-ctrl" style="background:#475569;color:#fca5a5" title="إلغاء من البوت دون بيع" onclick="unlinkPos('${bKey}','${s}', '${p.id}')">🚫</button>
+                </div>
+              </td>
+            </tr>`;
+          });
+        }
+      }
+      const colSpan = pfx === 'b3' ? 7 : 6;
+      const ordersTable = document.getElementById(pfx+'-orders');
+      if(ordersTable){
+        ordersTable.querySelector('tbody').innerHTML = posHtml || `<tr><td colspan="${colSpan}" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>`;
+      }
+    });
+
+    let b3MHtml = '';
+    if(d.bots && d.bots["BOT_3"] && d.bots["BOT_3"].symbols){
+      d.bots["BOT_3"].symbols.forEach(sym => {
+        const p = d.market_prices ? d.market_prices[sym] : null;
+        const ask = p ? p.ask : 0.0;
+        b3MHtml += `<tr>
+          <td><strong>${sym}</strong></td>
+          <td>${ask>0?ask+'$':'-'}</td>
+          <td><button class="btn" style="background:#0ea5e9;color:#fff;font-size:11px" onclick="triggerBuy('BOT_3','${sym}')">🎯 شراء وتسليم</button></td>
+          <td><button class="icon-btn manage-ctrl" style="background:#334155;color:#f87171" title="حذف من القائمة" onclick="removeCoinFromBot('BOT_3','${sym}')">🗑️</button></td>
+        </tr>`;
+      });
+    }
+    const b3MTable = document.getElementById('b3-market-table');
+    if(b3MTable){
+      b3MTable.querySelector('tbody').innerHTML = b3MHtml || '<tr><td colspan="4" style="text-align:center">لا توجد عملات مضافة</td></tr>';
+    }
+
+    let wHtml = '';
+    (d.wallet_assets||[]).forEach(a=>{
+      const canSell = a.asset !== 'USDT' && a.free > 0;
+      const priceStr = a.asset === 'USDT' ? '1.00 $' : (a.usd_price > 0 ? a.usd_price.toFixed(4) + ' $' : '-');
+      const valStr = a.usd_value > 0 ? a.usd_value.toFixed(2) + ' $' : '0.00 $';
+      
+      wHtml += `<tr>
+        <td><strong>${a.asset}</strong></td>
+        <td>${a.free}</td>
+        <td>${a.locked}</td>
+        <td>${priceStr}</td>
+        <td style="color:#38bdf8;font-weight:bold">${valStr}</td>
+        <td>
+          ${canSell ? `
+            <div style="display:flex;gap:3px">
+              <button class="icon-btn manage-ctrl" style="background:var(--danger);color:#fff" title="تسييل سوق" onclick="panicMarket('${a.asset}')">🔥</button>
+              <button class="icon-btn manage-ctrl" style="background:#f59e0b;color:#000" title="تسييل ليميت" onclick="panicLimit('${a.asset}', ${a.usd_price})">📝</button>
+            </div>
+          ` : '-'}
+        </td>
+      </tr>`;
+    });
+    const wTable = document.getElementById('w-table');
+    if(wTable){
+      wTable.querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="6" style="text-align:center">لا توجد أرصدة</td></tr>';
+    }
+
+    let ordHtml = '';
+    (d.open_limit_orders || []).forEach(o => {
+      ordHtml += `<tr>
+        <td><strong>${o.symbol}</strong></td>
+        <td style="color:${o.side==='BUY'?'var(--success)':'var(--danger)'};font-weight:bold">${o.side}</td>
+        <td>${parseFloat(o.price)}$</td>
+        <td>${parseFloat(o.origQty)}</td>
+        <td>${new Date(o.time).toLocaleTimeString()}</td>
+        <td><button class="icon-btn manage-ctrl" style="background:#dc2626;color:#fff" title="إلغاء الأمر" onclick="cancelLimitOrder('${o.symbol}', '${o.orderId}')">❌</button></td>
+      </tr>`;
+    });
+    const limitTable = document.getElementById('limit-orders-table');
+    if(limitTable){
+      limitTable.querySelector('tbody').innerHTML = ordHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أوامر معلقة في المنصة</td></tr>';
+    }
+
+    rawLogs = d.recent_logs || [];
+    renderLogs();
+  }catch(e){}
+}
+setInterval(update, 2000);
+update();
+</script>
+</body>
+</html>"""
+
+# =====================================================================
+# 🛡️ خادم الويب ومعالجة المسارات والصفحة المنفصلة
 # =====================================================================
 class WebHandler(http.server.BaseHTTPRequestHandler):
     def is_auth(self):
@@ -549,8 +1321,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(html_content.encode('utf-8'))
             except Exception:
-                self.send_response(404); self.end_headers()
-                self.wfile.write(b"Analytics page not found.")
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(b"<h3>Analytics file (analytics.html) not found. Please create it.</h3><a href='/'>Back</a>")
         elif self.path == '/api/logout':
             self.send_response(200); self.send_header('Set-Cookie', 'session_id=; Path=/; Max-Age=0'); self.end_headers()
         else:
@@ -727,10 +1499,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/edit_position':
             pos_id = data.get("pos_id")
             updates = {
-                "entry_price": data.get("entry_price"),
-                "qty": data.get("qty"),
-                "tp_pct": data.get("tp_pct"),
-                "sl_pct": data.get("sl_pct")
+                "entry_price": float(data.get("entry_price", 0.0)),
+                "qty": float(data.get("qty", 0.0)),
+                "tp_pct": float(data.get("tp_pct", 0.015)),
+                "sl_pct": float(data.get("sl_pct", 0.005))
             }
             database.update_active_trade(pos_id, updates)
             for bKey in ["BOT_1", "BOT_2", "BOT_3"]:
@@ -754,8 +1526,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             sym = data.get("symbol")
             side = data.get("side")
             o_type = data.get("order_type")
-            val = data.get("val")
-            price = data.get("price")
+            val = float(data.get("val", 0.0))
+            price = float(data.get("price", 0.0)) if data.get("price") else None
             
             if side == "BUY" and o_type == "MARKET":
                 ok, res = place_order(sym, side, quote_qty=val, order_type=o_type)
@@ -791,7 +1563,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == '/api/panic':
             asset = data.get("asset")
             order_type = data.get("order_type", "MARKET")
-            price = data.get("price")
+            price = float(data.get("price")) if data.get("price") else None
             free_qty = 0.0
 
             for a in shared_state.get("wallet_assets", []):
