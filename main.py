@@ -389,6 +389,7 @@ def trading_engine_loop():
 
             refresh_wallet_and_prices()
 
+            # 🎯 متابعة صفقات القناص المستقلة (Break-even & Trailing Stop)
             still_snipers = []
             for sp in shared_state.get("sniper_positions", []):
                 sym = sp["symbol"]
@@ -410,12 +411,15 @@ def trading_engine_loop():
                 tp_price = entry * (1.0 + sp.get("tp_pct", 0.03))
                 sl_price = entry * (1.0 - sp.get("sl_pct", 0.015))
 
+                # ميزة Break-Even: إذا حقق السعر نصف هدف الـ TP، يتم تأمين الصفقة على سعر الدخول
                 if not sp.get("is_break_even") and (highest >= entry * (1.0 + (sp.get("tp_pct", 0.03) * 0.5))):
                     sp["is_break_even"] = 1
                     database.update_sniper_trade(sp["id"], {"is_break_even": 1})
-                    add_log(f"🛡️ [Sniper] تأمين صفقة {sym} بنقل الوقف لسعر الدخول", "system", "success")
+                    add_log(f"🛡️ [Sniper] تأمين صفقة {sym} بنقل الوقف لسعر الدخول (Break-Even)", "system", "success")
 
                 effective_sl = entry if sp.get("is_break_even") else sl_price
+
+                # ميزة Trailing Stop للقناص
                 cb_pct = sp.get("trailing_cb", 0.008)
                 trailing_sl = highest * (1.0 - cb_pct)
                 if highest >= entry * (1.0 + cb_pct):
@@ -453,6 +457,7 @@ def trading_engine_loop():
 
             shared_state["sniper_positions"] = still_snipers
 
+            # متابعة صفقات البوتات الخمسة
             configs = {k: database.get_bot_config(k) for k in BOT_KEYS}
             for bKey, cfg in configs.items():
                 syms = parse_symbols_list(cfg.get("symbols", ""))
@@ -707,18 +712,28 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps(shared_state, ensure_ascii=False).encode('utf-8'))
         
-        elif self.path == '/api/scanner':
+        elif self.path.startswith('/api/scanner'):
             try:
+                query = urllib.parse.urlparse(self.path).query
+                params = urllib.parse.parse_qs(query)
+                sort_mode = params.get("sort", ["price"])[0]
+                min_vol = float(params.get("min_vol", [50000])[0])
+                limit = int(params.get("limit", [10])[0])
+
                 url = f"{BASE_URL}/api/v3/ticker/24hr"
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req, context=ssl_ctx, timeout=6) as res:
                     tickers = json.loads(res.read().decode('utf-8'))
                     usdt_tickers = [
                         t for t in tickers 
-                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) > 50000
+                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= min_vol
                     ]
-                    usdt_tickers.sort(key=lambda x: float(x.get("priceChangePercent", 0)), reverse=True)
-                    top_gainers = usdt_tickers[:14]
+                    if sort_mode == "volume":
+                        usdt_tickers.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+                    else:
+                        usdt_tickers.sort(key=lambda x: float(x.get("priceChangePercent", 0)), reverse=True)
+                    
+                    top_gainers = usdt_tickers[:limit]
                     self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
                     self.wfile.write(json.dumps(top_gainers, ensure_ascii=False).encode('utf-8'))
             except Exception:
