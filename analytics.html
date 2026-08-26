@@ -1,107 +1,106 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>التداول اليدوي المباشر</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>التداول اليدوي وسجل المنصة</title>
 <style>
 :root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
-body{background:var(--bg);color:var(--text);padding:12px;line-height:1.5}
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px}
-.btn{padding:8px 12px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:12px}
-input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:12px;width:100%}
-.pct-btn{background:#151e30;border:1px solid var(--border);color:var(--sub);padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px}
-.pct-btn:hover{background:#3b82f6;color:#fff}
+body{background:var(--bg);color:var(--text);padding:10px;line-height:1.4}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
+.btn{padding:6px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:11px}
+input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px;border-radius:6px;font-size:11px;width:100%}
+.pct-btn{background:#151e30;border:1px solid var(--border);color:var(--sub);padding:3px 6px;border-radius:4px;cursor:pointer;font-size:10px}
+table{width:100%;border-collapse:collapse;text-align:right}
+th,td{padding:5px 4px;border-bottom:1px solid var(--border);font-size:11px}
+th{color:var(--sub)}
 </style>
 </head>
 <body>
   <div class="card" style="display:flex;justify-content:space-between;align-items:center">
     <div>
-      <strong>📊 مركز التداول الفوري اليدوي</strong>
-      <div style="font-size:11px;color:var(--sub)">USDT المتاح: <strong id="m-usdt" style="color:#10b981">0.00 $</strong></div>
+      <strong>📊 مركز التداول وسجل MEXC</strong>
+      <div style="font-size:10px;color:var(--sub)">USDT المتاح: <strong id="m-usdt" style="color:#10b981">0.00 $</strong></div>
     </div>
     <a href="/" class="btn" style="background:#334155;color:#fff;text-decoration:none">🔙 الرئيسية</a>
   </div>
 
   <details open class="card">
-    <summary style="font-weight:bold;cursor:pointer;color:#38bdf8;padding:4px">⚡ لوحة الشراء والبيع اليدوي ▾</summary>
-    <div style="padding-top:10px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+    <summary style="font-weight:bold;cursor:pointer;color:#38bdf8;padding:4px">⚡ لوحة الشراء والبيع (Chase / Market / Limit) ▾</summary>
+    <div style="padding-top:8px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
         <div>
-          <label style="font-size:11px;color:var(--sub)">رمز العملة:</label>
-          <input type="text" id="t-sym" placeholder="مثال: SOLUSDT" value="SOLUSDT" oninput="fetchLivePrice()">
+          <label style="font-size:10px;color:var(--sub)">العملة:</label>
+          <input type="text" id="t-sym" value="SOLUSDT">
         </div>
         <div>
-          <label style="font-size:11px;color:var(--sub)">السعر اللحظي الحالي:</label>
-          <div id="live-ticker-price" style="background:#090d16;border:1px solid var(--border);padding:8px;border-radius:6px;font-weight:bold;color:#38bdf8">جاري الجلب...</div>
-        </div>
-      </div>
-
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
-        <div>
-          <label style="font-size:11px;color:var(--sub)">نوع الأمر:</label>
-          <select id="t-type" onchange="toggleLimitPrice()">
+          <label style="font-size:10px;color:var(--sub)">النوع:</label>
+          <select id="t-type" onchange="document.getElementById('limit-price-box').style.display = this.value === 'LIMIT' ? 'block' : 'none'">
+            <option value="CHASE_LIMIT" selected>متتبع ليميت (Chase 0% Fee)</option>
             <option value="MARKET">سعر السوق (Market)</option>
             <option value="LIMIT">أمر معلق (Limit)</option>
           </select>
         </div>
-        <div id="limit-price-box" style="display:none">
-          <label style="font-size:11px;color:var(--sub)">سعر التنفيذ المطلوب ($):</label>
-          <input type="number" id="t-price" placeholder="أدخل السعر">
-        </div>
       </div>
 
-      <div style="margin-bottom:10px">
+      <div id="limit-price-box" style="display:none;margin-bottom:6px">
+        <label style="font-size:10px;color:var(--sub)">سعر الليميت ($):</label>
+        <input type="number" id="t-price" placeholder="أدخل السعر">
+      </div>
+
+      <div style="margin-bottom:8px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-          <label style="font-size:11px;color:var(--sub)">القيمة بـ USDT أو الكمية:</label>
-          <div style="display:flex;gap:4px">
+          <label style="font-size:10px;color:var(--sub)">الكمية أو القيمة:</label>
+          <div style="display:flex;gap:3px">
             <button class="pct-btn" onclick="setPct(0.25)">25%</button>
             <button class="pct-btn" onclick="setPct(0.50)">50%</button>
             <button class="pct-btn" onclick="setPct(0.75)">75%</button>
             <button class="pct-btn" onclick="setPct(1.00)">100%</button>
           </div>
         </div>
-        <input type="number" id="t-qty" placeholder="القيمة بالدولار أو كمية العملة">
+        <input type="number" id="t-qty" placeholder="القيمة أو الكمية">
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <button class="btn" style="background:#10b981;color:#fff" onclick="execTrade('BUY')">🟢 تنفيذ شراء</button>
-        <button class="btn" style="background:#ef4444;color:#fff" onclick="execTrade('SELL')">🔴 تنفيذ بيع</button>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        <button class="btn" style="background:#10b981;color:#fff" onclick="execTrade('BUY')">🟢 شراء</button>
+        <button class="btn" style="background:#ef4444;color:#fff" onclick="execTrade('SELL')">🔴 بيع</button>
       </div>
+    </div>
+  </details>
+
+  <details open class="card">
+    <summary style="font-weight:bold;cursor:pointer;color:#60a5fa;padding:4px">📜 سجل الأوامر الحقيقي المباشر من MEXC ▾</summary>
+    <div style="display:flex;gap:4px;margin:6px 0">
+      <input type="text" id="hist-sym" value="SOLUSDT" style="width:140px">
+      <button class="btn" style="background:#0284c7;color:#fff" onclick="fetchExchangeHistory()">🔍 جلب السجل</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table id="mexc-history-table">
+        <thead>
+          <tr>
+            <th>العملة</th><th>النوع</th><th>الاتجاه</th><th>السعر</th><th>المنفذ</th><th>الحالة</th><th>الوقت</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="7" style="text-align:center;color:var(--sub)">اضغط جلب السجل لعرض أوامر المنصة</td></tr>
+        </tbody>
+      </table>
     </div>
   </details>
 
 <script>
 let freeUsdt = 0;
 async function loadBal(){
-  const r = await fetch('/api/data');
-  const d = await r.json();
-  freeUsdt = d.real_balance_usdt || 0;
-  document.getElementById('m-usdt').innerText = freeUsdt.toFixed(2) + ' $';
+  try{
+    const r = await fetch('/api/data');
+    const d = await r.json();
+    freeUsdt = d.real_balance_usdt || 0;
+    document.getElementById('m-usdt').innerText = freeUsdt.toFixed(2) + ' $';
+  }catch(e){}
 }
 loadBal(); setInterval(loadBal, 3000);
 
-async function fetchLivePrice(){
-  const sym = document.getElementById('t-sym').value.trim().toUpperCase();
-  if(!sym) return;
-  const targetSym = sym.endsWith('USDT') ? sym : sym + 'USDT';
-  try {
-    const r = await fetch('/api/data');
-    const d = await r.json();
-    if(d.market_prices && d.market_prices[targetSym]){
-      const p = d.market_prices[targetSym].ask || d.market_prices[targetSym].bid;
-      document.getElementById('live-ticker-price').innerText = p ? p + ' $' : 'غير متوفر';
-    }
-  } catch(e){}
-}
-setInterval(fetchLivePrice, 2500);
+function setPct(p){ document.getElementById('t-qty').value = (freeUsdt * p).toFixed(2); }
 
-function toggleLimitPrice(){
-  const t = document.getElementById('t-type').value;
-  document.getElementById('limit-price-box').style.display = t === 'LIMIT' ? 'block' : 'none';
-}
-function setPct(p){
-  document.getElementById('t-qty').value = (freeUsdt * p).toFixed(2);
-}
 async function execTrade(side){
   const sym = document.getElementById('t-sym').value.trim().toUpperCase();
   const type = document.getElementById('t-type').value;
@@ -109,7 +108,7 @@ async function execTrade(side){
   const price = parseFloat(document.getElementById('t-price').value);
 
   if(!sym || !val){ alert('يرجى ملء رمز العملة والقيمة'); return; }
-  if(type === 'LIMIT' && (!price || price <= 0)){ alert('يرجى تحديد سعر الأمر'); return; }
+  if(type === 'LIMIT' && (!price || price <= 0)){ alert('يرجى تحديد السعر'); return; }
 
   const payload = {
     symbol: sym.endsWith('USDT') ? sym : sym + 'USDT',
@@ -119,12 +118,39 @@ async function execTrade(side){
     price: price
   };
 
-  if(confirm(`تأكيد تنفيذ أمر ${side} لـ ${payload.symbol} بقيمة/كمية ${val}؟`)){
+  if(confirm('تأكيد تنفيذ أمر ' + side + ' لـ ' + payload.symbol + ' بقيمة ' + val + '؟')){
     const r = await fetch('/api/terminal_trade', {method:'POST', body:JSON.stringify(payload)});
     const d = await r.json();
     alert(d.msg);
     loadBal();
   }
+}
+
+async function fetchExchangeHistory(){
+  const sym = document.getElementById('hist-sym').value.trim().toUpperCase();
+  if(!sym){ alert("أدخل رمز العملة"); return; }
+  const fullSym = sym.endsWith("USDT") ? sym : sym + "USDT";
+  
+  const r = await fetch('/api/exchange_orders?symbol=' + fullSym);
+  const orders = await r.json();
+  let h = '';
+  if(Array.isArray(orders) && orders.length > 0){
+    orders.forEach(o => {
+      const sideColor = o.side === 'BUY' ? 'var(--success)' : 'var(--danger)';
+      h += '<tr>' +
+        '<td><strong>' + o.symbol + '</strong></td>' +
+        '<td>' + o.type + '</td>' +
+        '<td style="color:' + sideColor + ';font-weight:bold">' + o.side + '</td>' +
+        '<td>' + parseFloat(o.price) + '$</td>' +
+        '<td>' + parseFloat(o.executedQty) + ' / ' + parseFloat(o.origQty) + '</td>' +
+        '<td><span style="font-weight:bold">' + o.status + '</span></td>' +
+        '<td>' + new Date(o.time).toLocaleTimeString() + '</td>' +
+      '</tr>';
+    });
+  } else {
+    h = '<tr><td colspan="7" style="text-align:center;color:var(--sub)">لا توجد أوامر مسجلة لهذه العملة</td></tr>';
+  }
+  document.getElementById('mexc-history-table').querySelector('tbody').innerHTML = h;
 }
 </script>
 </body>
