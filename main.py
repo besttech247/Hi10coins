@@ -28,7 +28,6 @@ SYMBOL_RULES = {}
 LAST_ENTRY_CANDLE = {}
 BOT_KEYS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C", "BOT_3"]
 
-# حالة النظام بما فيها صفقات القناص المستقلة
 shared_state = {
     "api_connected": False,
     "has_saved_keys": False,
@@ -371,7 +370,6 @@ def refresh_wallet_and_prices():
     except Exception:
         pass
 
-# محرك التداول المركزي ومراقبة القناص
 def trading_engine_loop():
     fetch_server_ip()
     init_trades_from_db()
@@ -391,7 +389,7 @@ def trading_engine_loop():
 
             refresh_wallet_and_prices()
 
-            # 🎯 متابعة صفقات القناص المستقلة (Break-even & Trailing Stop)
+            # 🎯 متابعة صفقات القناص
             still_snipers = []
             for sp in shared_state.get("sniper_positions", []):
                 sym = sp["symbol"]
@@ -413,15 +411,12 @@ def trading_engine_loop():
                 tp_price = entry * (1.0 + sp.get("tp_pct", 0.03))
                 sl_price = entry * (1.0 - sp.get("sl_pct", 0.015))
 
-                # ميزة Break-Even: إذا حقق السعر نصف هدف الـ TP، يتم تأمين الصفقة على سعر الدخول
                 if not sp.get("is_break_even") and (highest >= entry * (1.0 + (sp.get("tp_pct", 0.03) * 0.5))):
                     sp["is_break_even"] = 1
                     database.update_sniper_trade(sp["id"], {"is_break_even": 1})
                     add_log(f"🛡️ [Sniper] تأمين صفقة {sym} بنقل الوقف لسعر الدخول (Break-Even)", "system", "success")
 
                 effective_sl = entry if sp.get("is_break_even") else sl_price
-
-                # ميزة Trailing Stop للقناص
                 cb_pct = sp.get("trailing_cb", 0.008)
                 trailing_sl = highest * (1.0 - cb_pct)
                 if highest >= entry * (1.0 + cb_pct):
@@ -667,786 +662,6 @@ def trading_engine_loop():
 
         time.sleep(7)
 
-def get_bot_html_fragment(b_key, b_name, b_tf, is_b3=False):
-    pfx = b_key.lower()
-    tf_markup = f"""
-    <div>
-      <label style="font-size:10px;color:var(--sub)">الفريم الزمني</label>
-      <select id="{pfx}-tf">
-        <option value="1m" {'selected' if b_tf=='1m' else ''}>1m</option>
-        <option value="5m" {'selected' if b_tf=='5m' else ''}>5m</option>
-        <option value="15m" {'selected' if b_tf=='15m' else ''}>15m</option>
-        <option value="30m" {'selected' if b_tf=='30m' else ''}>30m</option>
-        <option value="60m" {'selected' if b_tf=='60m' else ''}>1h</option>
-      </select>
-    </div>
-    """ if not is_b3 else f"""
-    <div>
-      <label style="font-size:10px;color:var(--sub)">Trailing Stop</label>
-      <select id="{pfx}-ts"><option value="1">مفعّل ✅</option><option value="0">معطّل ❌</option></select>
-    </div>
-    """
-
-    return f"""
-    <div id="t-{pfx}" class="tab-pane">
-      <div class="card" style="display:flex;justify-content:space-between;align-items:center">
-        <span>{b_name}: <strong id="{pfx}-st" style="color:#f59e0b">PAUSED</strong></span>
-        <div style="display:flex;gap:3px">
-          <button class="icon-btn" style="background:var(--success);color:#fff" title="تشغيل" onclick="setSt('{b_key}','RUNNING')">▶️</button>
-          <button class="icon-btn" style="background:#f59e0b;color:#000" title="إيقاف مؤقت" onclick="setSt('{b_key}','PAUSED')">⏸️</button>
-          <button class="icon-btn" style="background:var(--danger);color:#fff" title="إيقاف تام" onclick="setSt('{b_key}','STOPPED')">⏹️</button>
-        </div>
-      </div>
-      
-      <div class="stats-row">
-        <div class="stat-box">
-          <div class="stat-title">أرباح اليوم</div>
-          <div class="stat-val" id="{pfx}-pnl">+0.00$</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-title">نسبة الفوز</div>
-          <div class="stat-val" id="{pfx}-winrate">0%</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-title">السيولة المفتوحة</div>
-          <div class="stat-val" id="{pfx}-cap-used">0$</div>
-        </div>
-      </div>
-
-      <details class="card">
-        <summary style="color:#a78bfa">⚙️ الإعدادات وسقف رأس المال ▾</summary>
-        <div class="form-row" style="padding-top:8px">
-          <div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="{pfx}-alloc" value="50"></div>
-          <div><label style="font-size:10px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="{pfx}-maxcon" value="1"></div>
-          <div><label style="font-size:10px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="{pfx}-size" value="10"></div>
-          <div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label>
-            <select id="{pfx}-ordtype">
-              <option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option>
-              <option value="MARKET">سعر السوق (Market)</option>
-              <option value="LIMIT">أمر معلق (Limit)</option>
-            </select>
-          </div>
-          <div><label style="font-size:10px;color:var(--sub)">هدف الربح (TP %)</label><input type="number" id="{pfx}-tp" value="2.5" step="0.1"></div>
-          <div><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="{pfx}-sl" value="1.2" step="0.1"></div>
-          {tf_markup}
-          <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('{b_key}', '{pfx}')">💾 حفظ</button></div>
-        </div>
-      </details>
-
-      <details class="card" id="{pfx}-coins-card" open>
-        <summary style="display:flex;justify-content:space-between;align-items:center">
-          <span>📊 جدول العملات وأرباح اليوم</span>
-          <div style="display:flex;gap:3px" onclick="event.stopPropagation()">
-            <button class="btn manage-ctrl" style="background:#10b981;color:#fff;font-size:10px;padding:2px 4px" onclick="addCoinToBot('{b_key}')">➕ إضافة</button>
-            <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('{pfx}-coins-card')">⚙️</button>
-          </div>
-        </summary>
-        <div style="overflow-x:auto;padding-top:6px">
-          <table id="{pfx}-coins-table">
-            <thead>
-              <tr>
-                <th onclick="sortTable('{pfx}-coins-table', 0)" style="cursor:pointer">العملة ⇕</th>
-                <th onclick="sortTable('{pfx}-coins-table', 1)" style="cursor:pointer">السعر ⇕</th>
-                <th onclick="sortTable('{pfx}-coins-table', 2)" style="cursor:pointer">ربح اليوم ⇕</th>
-                <th>الصفقات</th>
-                <th>دخول</th>
-                <th class="manage-ctrl">حذف</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </details>
-
-      <details class="card" id="{pfx}-orders-card" open>
-        <summary style="display:flex;justify-content:space-between;align-items:center">
-          <span>📂 الصفقات المفتوحة (Live PnL)</span>
-          <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('{pfx}-orders-card'); event.stopPropagation();">⚙️</button>
-        </summary>
-        <div style="overflow-x:auto;padding-top:6px">
-          <table id="{pfx}-orders">
-            <thead>
-              <tr>
-                <th onclick="sortTable('{pfx}-orders', 0)" style="cursor:pointer">العملة ⇕</th>
-                <th onclick="sortTable('{pfx}-orders', 1)" style="cursor:pointer">الدخول ⇕</th>
-                <th>الكمية</th>
-                <th onclick="sortTable('{pfx}-orders', 3)" style="cursor:pointer">Live PnL ⇕</th>
-                <th>الوقت</th>
-                <th class="manage-ctrl">إجراءات</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </details>
-
-      <details class="card">
-        <summary style="color:#60a5fa">📜 سجل الصفقات المغلقة والعمولات ({b_name}) ▾</summary>
-        <div style="overflow-x:auto;padding-top:6px">
-          <table id="{pfx}-history-table">
-            <thead>
-              <tr>
-                <th>العملة</th><th>الدخول</th><th>الخروج</th><th>الكمية</th><th>صافي الربح</th><th>العمولة</th><th>السبب</th><th>الوقت</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </details>
-    </div>
-    """
-
-def get_complete_dashboard():
-    b1 = get_bot_html_fragment('BOT_1', '🤖 Bot 1 (EWO 5m)', '5m', False)
-    b2a = get_bot_html_fragment('BOT_2A', '⚡ Bot 2A (Scalp 15m)', '15m', False)
-    b2b = get_bot_html_fragment('BOT_2B', '⚡ Bot 2B (Swing 1h)', '60m', False)
-    b2c = get_bot_html_fragment('BOT_2C', '⚡ Bot 2C (Custom TF)', '5m', False)
-    b3 = get_bot_html_fragment('BOT_3', '🎯 Bot 3 (Manual Trigger)', '1m', True)
-
-    header_and_tabs = f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"><title>MEXC Multi-Bot Hub</title>
-<style>
-:root{{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}}
-*{{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}}
-body{{background:var(--bg);color:var(--text);padding:8px;line-height:1.4}}
-.header-box{{display:flex;justify-content:space-between;align-items:center;padding:10px;background:var(--card);border-radius:10px;border:1px solid var(--border);margin-bottom:8px;flex-wrap:wrap;gap:6px}}
-.wallet-bar{{display:flex;gap:8px;align-items:center;background:#151e30;padding:4px 8px;border-radius:6px;border:1px solid var(--border)}}
-.tabs{{display:flex;gap:4px;margin:8px 0;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px}}
-.tab{{padding:6px 10px;background:#151e30;border:1px solid var(--border);border-radius:6px;color:var(--sub);cursor:pointer;font-weight:bold;white-space:nowrap;font-size:12px}}
-.tab.active{{background:var(--primary);color:#fff}}
-.tab-pane{{display:none}}
-.tab-pane.active{{display:block}}
-.card{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px}}
-.stats-row{{display:flex;gap:6px;margin-bottom:8px}}
-.stat-box{{flex:1;background:#151e30;border:1px solid var(--border);border-radius:8px;padding:6px 4px;text-align:center}}
-.stat-title{{font-size:10px;color:var(--sub);margin-bottom:2px;white-space:nowrap}}
-.stat-val{{font-size:13px;font-weight:bold}}
-.btn{{padding:4px 8px;border:none;border-radius:5px;font-weight:bold;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;justify-content:center;gap:3px}}
-.icon-btn{{padding:3px 6px;font-size:13px;border-radius:5px;border:none;cursor:pointer}}
-table{{width:100%;border-collapse:collapse;text-align:right}}
-th,td{{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}}
-th{{color:var(--sub)}}
-.badge{{padding:2px 4px;border-radius:4px;font-size:10px;font-weight:bold}}
-.badge-active{{background:#10b98122;color:var(--success)}}
-.badge-idle{{background:#64748b22;color:var(--sub)}}
-.logs{{max-height:180px;overflow-y:auto;font-family:monospace;font-size:10.5px;background:#090d16;padding:6px;border-radius:6px;border:1px solid var(--border)}}
-.log-item{{padding:2px 0;border-bottom:1px solid #1f293d44;display:flex;gap:4px}}
-input,select{{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px;border-radius:6px;font-size:11px;width:100%}}
-details{{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}}
-summary{{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font-size:12px}}
-.form-row{{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;padding:8px}}
-.manage-ctrl{{display:none}}
-.manage-mode .manage-ctrl{{display:table-cell}}
-.modal-overlay{{position:fixed;top:0;left:0;right:0;bottom:0;background:#00000088;display:none;align-items:center;justify-content:center;z-index:99}}
-.modal{{background:#111827;border:1px solid var(--border);padding:14px;border-radius:10px;width:290px}}
-</style>
-</head>
-<body>
-  <div class="header-box">
-    <div>
-      <div style="display:flex;align-items:center;gap:6px">
-        <strong>🎛️ Command Hub</strong>
-        <a href="/sniper" style="color:#38bdf8;font-size:11px;text-decoration:none;background:#1e293b;padding:2px 6px;border-radius:4px">🎯 رادار القناص ↗</a>
-        <a href="/analytics" style="color:#60a5fa;font-size:11px;text-decoration:none;background:#1e293b;padding:2px 6px;border-radius:4px">📊 تداول يدوي ↗</a>
-      </div>
-      <div style="font-size:10px;color:var(--sub)">Live PnL الكلي: <strong id="total-live-pnl-val" style="color:#10b981">+0.00$</strong></div>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px">
-      <div class="wallet-bar">
-        <div><span style="font-size:10px;color:var(--sub)">USDT:</span> <strong id="live-usdt" style="color:#10b981;font-size:12px">0.00 $</strong></div>
-        <div style="border-right:1px solid var(--border);padding-right:6px"><span style="font-size:10px;color:var(--sub)">المحفظة:</span> <strong id="live-total-usd" style="color:#38bdf8;font-size:12px">0.00 $</strong></div>
-      </div>
-      <span id="api-stat" style="font-size:11px">فحص...</span>
-      <button class="icon-btn" style="background:#334155;color:#fff" title="خروج" onclick="fetch('/api/logout').then(function(){{location.href='/login'}})">🚪</button>
-    </div>
-  </div>
-
-  <details id="keys-box">
-    <summary style="color:#60a5fa">🔑 إعدادات المفاتيح و IP السيرفر ▾ <span id="keys-status-badge"></span></summary>
-    <div style="padding:8px">
-      <div style="background:#090d16;padding:5px 8px;border-radius:6px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:10px;color:var(--sub)">IP: <strong id="server-ip-val" style="color:#38bdf8;font-family:monospace">جاري...</strong></span>
-        <button class="btn" style="background:#0284c7;color:#fff;font-size:10px;padding:2px 6px" onclick="copyServerIP()">📋 نسخ</button>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:4px">
-        <input type="password" id="m-key" placeholder="API Key">
-        <input type="password" id="m-sec" placeholder="API Secret">
-      </div>
-      <button class="btn" style="background:var(--primary);color:#fff;width:100%;margin-bottom:6px" onclick="saveKeys()">💾 حفظ المفاتيح</button>
-      <div style="display:grid;grid-template-columns:1fr auto;gap:4px">
-        <input type="password" id="new-pass" placeholder="كلمة المرور الجديدة">
-        <button class="btn" style="background:#10b981;color:#fff" onclick="changePass()">تحديث 🔒</button>
-      </div>
-    </div>
-  </details>
-
-  <div class="tabs">
-    <button class="tab active" onclick="showTab('t-bot_1', this)">🤖 Bot 1</button>
-    <button class="tab" onclick="showTab('t-bot_2a', this)">⚡ Bot 2A</button>
-    <button class="tab" onclick="showTab('t-bot_2b', this)">⚡ Bot 2B</button>
-    <button class="tab" onclick="showTab('t-bot_2c', this)">⚡ Bot 2C</button>
-    <button class="tab" onclick="showTab('t-bot_3', this)">🎯 Bot 3</button>
-    <button class="tab" onclick="showTab('t-w', this)">💰 المحفظة</button>
-  </div>
-
-  {b1}
-  {b2a}
-  {b2b}
-  {b2c}
-  {b3}
-
-  <!-- Wallet Tab -->
-  <div id="t-w" class="tab-pane">
-    <details class="card" id="wallet-card" open>
-      <summary style="display:flex;justify-content:space-between;align-items:center">
-        <span>💼 المحفظة (الرصيد الحر والمربوط بالبوتات)</span>
-        <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
-          <button class="btn" style="background:#0284c7;color:#fff;font-size:10px" onclick="triggerUpdate()">🔄 تحديث</button>
-          <button class="btn manage-ctrl" style="background:#8b5cf6;color:#fff;font-size:10px" onclick="convertDustDirect()">🔄 تحويل لـ MX</button>
-          <button class="btn manage-ctrl" style="background:var(--danger);color:#fff;font-size:10px" onclick="panicSellAll()">🔥 تسييل الكل</button>
-          <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('wallet-card')">⚙️</button>
-        </div>
-      </summary>
-      <div style="overflow-x:auto;padding-top:6px">
-        <table id="w-table">
-          <thead>
-            <tr>
-              <th onclick="sortTable('w-table', 0)" style="cursor:pointer">العملة ⇕</th>
-              <th>المتاح الكلي</th>
-              <th>مربوط ببوتات</th>
-              <th>حر غير مربوط</th>
-              <th>القيمة ($)</th>
-              <th class="manage-ctrl">تسييل مخصص</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </details>
-
-    <details class="card" id="pending-card" open>
-      <summary style="display:flex;justify-content:space-between;align-items:center">
-        <span>⏳ الأوامر المعلقة في MEXC</span>
-        <button class="icon-btn manage-ctrl" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('pending-card')">⚙️</button>
-      </summary>
-      <div style="overflow-x:auto;padding-top:6px">
-        <table id="limit-orders-table">
-          <thead><tr><th>العملة</th><th>النوع</th><th>السعر</th><th>الكمية</th><th>الوقت</th><th class="manage-ctrl">إلغاء</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </details>
-  </div>
-
-  <div class="modal-overlay" id="edit-modal">
-    <div class="modal">
-      <h4 style="margin-bottom:6px;font-size:12px">✏️ تعديل الصفقة</h4>
-      <input type="hidden" id="edit-pos-id">
-      <div style="margin-bottom:4px"><label style="font-size:10px;color:var(--sub)">سعر الدخول ($):</label><input type="number" id="edit-entry" step="any"></div>
-      <div style="margin-bottom:4px"><label style="font-size:10px;color:var(--sub)">الكمية:</label><input type="number" id="edit-qty" step="any"></div>
-      <div style="margin-bottom:4px"><label style="font-size:10px;color:var(--sub)">جني الأرباح (TP %):</label><input type="number" id="edit-tp" step="0.1"></div>
-      <div style="margin-bottom:6px"><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %):</label><input type="number" id="edit-sl" step="0.1"></div>
-      <div style="display:flex;gap:4px">
-        <button class="btn" style="background:#10b981;color:#fff;width:100%" onclick="saveEditedPos()">💾 حفظ</button>
-        <button class="btn" style="background:#334155;color:#fff;width:100%" onclick="closeEditModal()">إلغاء</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal-overlay" id="panic-modal">
-    <div class="modal">
-      <h4 style="margin-bottom:6px;font-size:12px">🔥 تسييل العملة</h4>
-      <input type="hidden" id="panic-asset">
-      <div style="font-size:11px;margin-bottom:8px" id="panic-info-text"></div>
-      <div style="display:flex;flex-direction:column;gap:6px">
-        <button class="btn" style="background:#f59e0b;color:#000" onclick="execCustomPanic('UNLINKED')">بيع الفائض الحر فقط</button>
-        <button class="btn" style="background:var(--danger);color:#fff" onclick="execCustomPanic('ALL')">بيع الرصيد كاملاً وتصفير البوتات</button>
-        <button class="btn" style="background:#334155;color:#fff" onclick="document.getElementById('panic-modal').style.display='none'">إلغاء</button>
-      </div>
-    </div>
-  </div>
-
-  <details class="card" open>
-    <summary style="display:flex;justify-content:space-between;align-items:center">
-      <span>📜 السجل المباشر</span>
-      <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
-        <input type="text" id="log-search" placeholder="🔍 بحث..." style="width:80px;padding:2px 4px;font-size:10px" oninput="renderLogs()">
-        <button class="icon-btn" style="background:#334155;color:#fff" title="نسخ" onclick="copyLogs()">📋</button>
-      </div>
-    </summary>
-    <div style="padding-top:6px">
-      <div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:4px">
-        <button class="btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('all', this)">الكل</button>
-        <button class="btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('buys', this)">🚀 شراء</button>
-        <button class="btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('sells', this)">💰 بيع</button>
-        <button class="btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('orders', this)">📤 أوامر</button>
-      </div>
-      <div class="logs" id="logs"></div>
-    </div>
-  </details>
-
-<script>
-var BOT_KEYS_JS = ['BOT_1', 'BOT_2A', 'BOT_2B', 'BOT_2C', 'BOT_3'];
-var rawLogs = [];
-var logsText = "";
-var currentLogFilter = "all";
-var startTs = Date.now();
-var keysLoaded = false;
-var currentPublicIP = "";
-var initialConfigsPopulated = false;
-
-document.addEventListener('DOMContentLoaded', function(){{
-  var firstPane = document.getElementById('t-bot_1');
-  if(firstPane) firstPane.classList.add('active');
-}});
-
-function showTab(id, btn){{
-  document.querySelectorAll('.tab-pane').forEach(function(p){{ p.classList.remove('active'); }});
-  document.querySelectorAll('.tab').forEach(function(b){{ b.classList.remove('active'); }});
-  var target = document.getElementById(id);
-  if(target) target.classList.add('active');
-  if(btn) btn.classList.add('active');
-}}
-
-function setLogFilter(cat, btn){{
-  currentLogFilter = cat;
-  renderLogs();
-}}
-
-function copyLogs(){{
-  navigator.clipboard.writeText(logsText).then(function(){{ alert("✅ تم نسخ السجلات!"); }});
-}}
-
-function copyServerIP(){{
-  if(currentPublicIP && currentPublicIP !== "جاري الجلب..."){{
-    navigator.clipboard.writeText(currentPublicIP).then(function(){{ alert("IP: " + currentPublicIP); }});
-  }}
-}}
-
-function toggleManage(cardId){{
-  var el = document.getElementById(cardId);
-  if(el) el.classList.toggle('manage-mode');
-}}
-
-function triggerUpdate(){{
-  update();
-  alert("🔄 جاري التحديث من المنصة...");
-}}
-
-function sortTable(tableId, colIdx){{
-  var table = document.getElementById(tableId);
-  if(!table) return;
-  var tbody = table.querySelector('tbody');
-  var rows = Array.from(tbody.querySelectorAll('tr'));
-  if(rows.length <= 1) return;
-
-  var isAsc = table.getAttribute('data-sort-dir') !== 'asc';
-  table.setAttribute('data-sort-dir', isAsc ? 'asc' : 'desc');
-
-  rows.sort(function(a, b){{
-    var aText = a.children[colIdx] ? a.children[colIdx].innerText.replace(/[$%+]/g, '').trim() : '';
-    var bText = b.children[colIdx] ? b.children[colIdx].innerText.replace(/[$%+]/g, '').trim() : '';
-    var aNum = parseFloat(aText);
-    var bNum = parseFloat(bText);
-
-    if(!isNaN(aNum) && !isNaN(bNum)){{
-      return isAsc ? aNum - bNum : bNum - aNum;
-    }}
-    return isAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
-  }});
-
-  rows.forEach(function(r){{ tbody.appendChild(r); }});
-}}
-
-async function setSt(b, s){{
-  await fetch('/api/control', {{method:'POST', body:JSON.stringify({{bot_name:b, status:s}})}});
-  update();
-}}
-
-async function saveKeys(){{
-  var k = document.getElementById('m-key').value.replace(/\\s+/g, '');
-  var s = document.getElementById('m-sec').value.replace(/\\s+/g, '');
-  if(!k || !s){{ alert("يرجى إدخال المفتاح والسر"); return; }}
-  await fetch('/api/save_keys', {{method:'POST', body:JSON.stringify({{api_key:k, api_secret:s}})}});
-  alert('✅ تم حفظ مفاتيح MEXC!');
-  update();
-}}
-
-async function changePass(){{
-  var p = document.getElementById('new-pass').value;
-  if(!p){{ alert("أدخل كلمة المرور"); return; }}
-  var res = await fetch('/api/change_password', {{method:'POST', body:JSON.stringify({{new_password:p}})}});
-  if(res.ok){{ alert("✅ تم التغيير!"); document.getElementById('new-pass').value = ''; }}
-}}
-
-async function addCoinToBot(botName){{
-  var coin = prompt('أدخل رمز العملة لـ ' + botName + ' (مثال: SOL أو BTC):');
-  if(coin && coin.trim()){{
-    var r = await fetch('/api/add_symbol', {{method: 'POST', body: JSON.stringify({{bot_name: botName, symbol: coin.trim().toUpperCase()}})}});
-    var d = await r.json();
-    alert(d.msg);
-    update();
-  }}
-}}
-
-async function removeCoinFromBot(botName, sym){{
-  if(confirm('حذف (' + sym + ') من ' + botName + '؟')){{
-    var r = await fetch('/api/remove_symbol', {{method: 'POST', body: JSON.stringify({{bot_name: botName, symbol: sym}})}});
-    var d = await r.json();
-    alert(d.msg);
-    update();
-  }}
-}}
-
-async function saveBotCfg(botName, prefix){{
-  var payload = {{
-    bot_name: botName,
-    max_allocation_usdt: parseFloat(document.getElementById(prefix+'-alloc').value)||50,
-    max_concurrent_per_coin: parseInt(document.getElementById(prefix+'-maxcon').value)||1,
-    trade_size_usdt: parseFloat(document.getElementById(prefix+'-size').value)||10,
-    order_exec_type: document.getElementById(prefix+'-ordtype') ? document.getElementById(prefix+'-ordtype').value : 'CHASE_LIMIT',
-    tp_pct: (parseFloat(document.getElementById(prefix+'-tp').value)||2.5) / 100.0,
-    sl_pct: (parseFloat(document.getElementById(prefix+'-sl').value)||1.2) / 100.0
-  }};
-  var tfEl = document.getElementById(prefix+'-tf');
-  if(tfEl) payload.timeframe = tfEl.value;
-  var tsEl = document.getElementById(prefix+'-ts');
-  if(tsEl) payload.trailing_stop = parseInt(tsEl.value);
-
-  await fetch('/api/save_bot_config', {{method:'POST', body:JSON.stringify(payload)}});
-  alert('✅ تم حفظ إعدادات ' + botName + '!');
-  update();
-}}
-
-async function triggerBuy(botName, sym){{
-  if(confirm('إطلاق شراء لـ ' + sym + ' عبر ' + botName + '؟')){{
-    var r = await fetch('/api/manual_buy', {{method:'POST', body:JSON.stringify({{bot_name:botName, symbol:sym}})}});
-    var d = await r.json();
-    alert(d.msg);
-    update();
-  }}
-}}
-
-async function closeSinglePos(botName, sym, posId){{
-  if(confirm('تسييل ' + sym + ' فوري بسعر السوق؟')){{
-    var r = await fetch('/api/close_position', {{method:'POST', body:JSON.stringify({{bot_name:botName, symbol:sym, pos_id:posId}})}});
-    var d = await r.json();
-    alert(d.msg);
-    update();
-  }}
-}}
-
-async function unlinkPos(botName, sym, posId){{
-  if(confirm('إلغاء وإزالة الصفقة من البوت دون بيعها في المنصة؟')){{
-    var r = await fetch('/api/unlink_position', {{method:'POST', body:JSON.stringify({{bot_name:botName, symbol:sym, pos_id:posId}})}});
-    var d = await r.json();
-    alert(d.msg);
-    update();
-  }}
-}}
-
-function openEditModal(posId, entry, qty, tp, sl){{
-  document.getElementById('edit-pos-id').value = posId;
-  document.getElementById('edit-entry').value = entry;
-  document.getElementById('edit-qty').value = qty;
-  document.getElementById('edit-tp').value = ((tp||0.025)*100).toFixed(2);
-  document.getElementById('edit-sl').value = ((sl||0.012)*100).toFixed(2);
-  document.getElementById('edit-modal').style.display = 'flex';
-}}
-function closeEditModal(){{
-  document.getElementById('edit-modal').style.display = 'none';
-}}
-async function saveEditedPos(){{
-  var posId = document.getElementById('edit-pos-id').value;
-  var payload = {{
-    pos_id: posId,
-    entry_price: parseFloat(document.getElementById('edit-entry').value),
-    qty: parseFloat(document.getElementById('edit-qty').value),
-    tp_pct: (parseFloat(document.getElementById('edit-tp').value)||2.5)/100.0,
-    sl_pct: (parseFloat(document.getElementById('edit-sl').value)||1.2)/100.0
-  }};
-  await fetch('/api/edit_position', {{method:'POST', body:JSON.stringify(payload)}});
-  closeEditModal();
-  alert("✅ تم التعديل وحفظ البيانات!");
-  update();
-}}
-
-function openPanicModal(asset, free, alloc, unlinked){{
-  document.getElementById('panic-asset').value = asset;
-  document.getElementById('panic-info-text').innerHTML =
-    'عملة: <strong>' + asset + '</strong><br>' +
-    'المتاح الكلي: <strong>' + free + '</strong><br>' +
-    'مربوط بالبوتات: <strong>' + alloc + '</strong><br>' +
-    'الحر الفائض: <strong>' + unlinked + '</strong>';
-  document.getElementById('panic-modal').style.display = 'flex';
-}}
-
-async function execCustomPanic(mode){{
-  var asset = document.getElementById('panic-asset').value;
-  var r = await fetch('/api/panic_custom', {{method:'POST', body:JSON.stringify({{asset:asset, mode:mode}})}});
-  var d = await r.json();
-  document.getElementById('panic-modal').style.display = 'none';
-  alert(d.msg);
-  update();
-}}
-
-async function cancelLimitOrder(sym, orderId){{
-  if(confirm('إلغاء الأمر ' + orderId + ' لـ ' + sym + ' في MEXC؟')){{
-    var r = await fetch('/api/cancel_order', {{method:'POST', body:JSON.stringify({{symbol:sym, order_id:orderId}})}});
-    var d = await r.json();
-    alert(d.msg);
-    update();
-  }}
-}}
-
-async function convertDustDirect(){{
-  if(confirm("تحويل الأرصدة الصغيرة لـ MX؟")){{
-    var r = await fetch('/api/convert_dust_direct', {{method:'POST'}});
-    var d = await r.json();
-    alert(d.msg);
-    update();
-  }}
-}}
-
-async function panicSellAll(){{
-  if(confirm("⚠️ تسييل كل العملات لـ USDT؟")){{
-    var r = await fetch('/api/panic_all', {{method:'POST'}});
-    var d = await r.json();
-    alert(d.msg);
-    update();
-  }}
-}}
-
-function renderLogs(){{
-  var searchQ = (document.getElementById('log-search').value || '').toLowerCase();
-  var lHtml = '';
-  logsText = '';
-
-  rawLogs.forEach(function(l){{
-    var cat = l.cat || 'system';
-    var msgLower = (l.msg || '').toLowerCase();
-    if(currentLogFilter !== 'all' && cat !== currentLogFilter) return;
-    if(searchQ && !msgLower.includes(searchQ) && !cat.includes(searchQ)) return;
-
-    var typeColor = '#f3f4f6';
-    if(l.type === 'danger') typeColor = 'var(--danger)';
-    else if(l.type === 'success') typeColor = 'var(--success)';
-    else if(l.type === 'warning') typeColor = '#f59e0b';
-    else if(l.type === 'primary') typeColor = '#60a5fa';
-
-    lHtml += '<div class="log-item"><span style="color:var(--sub)">[' + l.time + ']</span> <span style="color:' + typeColor + '">' + l.msg + '</span></div>';
-    logsText += '[' + l.time + '] ' + l.msg + '\\n';
-  }});
-  document.getElementById('logs').innerHTML = lHtml || '<div style="color:var(--sub);text-align:center">لا توجد أحداث</div>';
-}}
-
-async function update(){{
-  try{{
-    var res = await fetch('/api/data');
-    if(res.status===401){{ location.href='/login'; return; }}
-    var d = await res.json();
-    
-    if(d.server_public_ip){{
-      currentPublicIP = d.server_public_ip;
-      document.getElementById('server-ip-val').innerText = d.server_public_ip;
-    }}
-
-    document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + ' $';
-    document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0.0).toFixed(2) + ' $';
-    
-    var livePnlVal = d.total_live_pnl || 0.0;
-    var pnlEl = document.getElementById('total-live-pnl-val');
-    pnlEl.innerText = (livePnlVal >= 0 ? '+' : '') + livePnlVal.toFixed(2) + ' $';
-    pnlEl.style.color = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
-
-    document.getElementById('api-stat').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 متصل</span>' : '<span style="color:var(--danger)">🔴 مفصول</span>';
-
-    if(d.has_saved_keys){{
-      document.getElementById('keys-status-badge').innerHTML = '<span style="color:var(--success);font-weight:bold">(' + d.masked_key + ')</span>';
-      if(!keysLoaded){{
-        document.getElementById('m-key').placeholder = 'محفوظ (' + d.masked_key + ')';
-        document.getElementById('m-sec').placeholder = "محفوظ (*********)";
-        keysLoaded = true;
-      }}
-    }}
-
-    if(!initialConfigsPopulated && d.bots){{
-      BOT_KEYS_JS.forEach(function(bKey){{
-        var pfx = bKey.toLowerCase();
-        var bObj = d.bots[bKey];
-        if(bObj){{
-          if(document.getElementById(pfx+'-alloc') && bObj.max_allocation) document.getElementById(pfx+'-alloc').value = bObj.max_allocation;
-          if(document.getElementById(pfx+'-size') && bObj.trade_size) document.getElementById(pfx+'-size').value = bObj.trade_size;
-          if(document.getElementById(pfx+'-maxcon') && bObj.max_concurrent) document.getElementById(pfx+'-maxcon').value = bObj.max_concurrent;
-          if(document.getElementById(pfx+'-ordtype') && bObj.order_exec_type) document.getElementById(pfx+'-ordtype').value = bObj.order_exec_type;
-          if(document.getElementById(pfx+'-tp') && bObj.tp_pct !== undefined) document.getElementById(pfx+'-tp').value = bObj.tp_pct;
-          if(document.getElementById(pfx+'-sl') && bObj.sl_pct !== undefined) document.getElementById(pfx+'-sl').value = bObj.sl_pct;
-          if(document.getElementById(pfx+'-tf') && bObj.timeframe) document.getElementById(pfx+'-tf').value = bObj.timeframe;
-          if(document.getElementById(pfx+'-ts') && bObj.trailing_stop !== undefined) document.getElementById(pfx+'-ts').value = bObj.trailing_stop;
-        }}
-      }});
-      initialConfigsPopulated = true;
-    }}
-
-    BOT_KEYS_JS.forEach(function(bKey){{
-      try{{
-        var pfx = bKey.toLowerCase();
-        var bObj = d.bots ? d.bots[bKey] : null;
-        if(!bObj) return;
-
-        var stEl = document.getElementById(pfx+'-st');
-        if(stEl){{
-          stEl.innerText = bObj.status || 'PAUSED';
-          stEl.style.color = bObj.status === 'RUNNING' ? '#10b981' : (bObj.status === 'PAUSED' ? '#f59e0b' : '#ef4444');
-        }}
-
-        var pnl = bObj.daily_pnl || 0.0;
-        var pnlEl = document.getElementById(pfx+'-pnl');
-        if(pnlEl){{
-          pnlEl.innerText = (pnl >= 0 ? '+' : '') + pnl.toFixed(3) + '$';
-          pnlEl.style.color = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
-        }}
-
-        var totalT = bObj.trades_count || 0;
-        var winT = bObj.winning_count || 0;
-        var wr = totalT > 0 ? ((winT / totalT) * 100).toFixed(0) : '0';
-        var wrEl = document.getElementById(pfx+'-winrate');
-        if(wrEl) wrEl.innerText = wr + '% (' + totalT + ')';
-
-        var totalOpen = 0;
-        var coinsTableHtml = '';
-        (bObj.symbols || []).forEach(function(sym){{
-          var count = (bObj.active_positions && bObj.active_positions[sym]) ? bObj.active_positions[sym].length : 0;
-          totalOpen += count;
-          var coinPnl = (bObj.daily_pnl_coins && bObj.daily_pnl_coins[sym]) ? bObj.daily_pnl_coins[sym] : 0.0;
-          var price = (d.market_prices && d.market_prices[sym]) ? d.market_prices[sym].bid : 0.0;
-
-          coinsTableHtml += '<tr>' +
-            '<td><strong>' + sym + '</strong></td>' +
-            '<td>' + (price ? price.toFixed(4)+'$' : '-') + '</td>' +
-            '<td style="color:' + (coinPnl>=0?'var(--success)':'var(--danger)') + ';font-weight:bold">' + (coinPnl>=0?'+':'') + coinPnl.toFixed(3) + '$</td>' +
-            '<td><span class="badge ' + (count>0?'badge-active':'badge-idle') + '">' + count + '/' + (bObj.max_concurrent||1) + '</span></td>' +
-            '<td><button class="icon-btn" style="background:var(--primary);color:#fff" title="شراء" onclick="triggerBuy(\\'' + bKey + '\\',\\'' + sym + '\\')">⚡</button></td>' +
-            '<td class="manage-ctrl"><button class="icon-btn" style="background:#334155;color:#f87171" title="حذف" onclick="removeCoinFromBot(\\'' + bKey + '\\',\\'' + sym + '\\')">🗑️</button></td>' +
-          '</tr>';
-        }});
-
-        var coinsTable = document.getElementById(pfx+'-coins-table');
-        if(coinsTable){{
-          coinsTable.querySelector('tbody').innerHTML = coinsTableHtml || '<tr><td colspan="6" style="text-align:center">لا توجد عملات</td></tr>';
-        }}
-        
-        var usedUsd = totalOpen * (bObj.trade_size || 10);
-        var capEl = document.getElementById(pfx+'-cap-used');
-        if(capEl) capEl.innerText = usedUsd.toFixed(0) + '/' + (bObj.max_allocation||50) + '$';
-
-        var posHtml = '';
-        if(bObj.active_positions){{
-          for(var s in bObj.active_positions){{
-            var curBid = (d.market_prices && d.market_prices[s]) ? d.market_prices[s].bid : 0.0;
-            (bObj.active_positions[s] || []).forEach(function(p){{
-              var livePnlVal = curBid ? (curBid - p.entry_price) * p.qty : 0.0;
-              var livePnlPct = (curBid && p.entry_price > 0) ? ((curBid - p.entry_price) / p.entry_price) * 100.0 : 0.0;
-              var pnlColor = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
-
-              posHtml += '<tr>' +
-                '<td><strong>' + s + '</strong></td>' +
-                '<td>' + p.entry_price + '$</td>' +
-                '<td>' + p.qty + '</td>' +
-                '<td style="color:' + pnlColor + ';font-weight:bold">' + (livePnlVal>=0?'+':'') + livePnlVal.toFixed(3) + '$ (' + livePnlPct.toFixed(2) + '%)</td>' +
-                '<td>' + p.time + '</td>' +
-                '<td class="manage-ctrl">' +
-                  '<div style="display:flex;gap:3px">' +
-                    '<button class="icon-btn" style="background:var(--danger);color:#fff" title="تسييل" onclick="closeSinglePos(\\'' + bKey + '\\',\\'' + s + '\\', \\'' + p.id + '\\')">🔥</button>' +
-                    '<button class="icon-btn" style="background:#3b82f6;color:#fff" title="تعديل" onclick="openEditModal(\\'' + p.id + '\\', ' + p.entry_price + ', ' + p.qty + ', ' + (p.tp_pct||0.025) + ', ' + (p.sl_pct||0.012) + ')">✏️</button>' +
-                    '<button class="icon-btn" style="background:#475569;color:#fca5a5" title="فك ربط" onclick="unlinkPos(\\'' + bKey + '\\',\\'' + s + '\\', \\'' + p.id + '\\')">🚫</button>' +
-                  '</div>' +
-                '</td>' +
-              '</tr>';
-            }});
-          }}
-        }}
-        var ordersTable = document.getElementById(pfx+'-orders');
-        if(ordersTable){{
-          ordersTable.querySelector('tbody').innerHTML = posHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>';
-        }}
-
-        fetch('/api/history?bot_name=' + bKey).then(function(r){{ return r.json(); }}).then(function(hList){{
-          var hHtml = '';
-          hList.forEach(function(h){{
-            var netColor = h.net_pnl >= 0 ? 'var(--success)' : 'var(--danger)';
-            hHtml += '<tr>' +
-              '<td><strong>' + h.symbol + '</strong></td>' +
-              '<td>' + h.entry_price + '$</td>' +
-              '<td>' + h.exit_price + '$</td>' +
-              '<td>' + h.qty + '</td>' +
-              '<td style="color:' + netColor + ';font-weight:bold">' + (h.net_pnl>=0?'+':'') + h.net_pnl.toFixed(3) + '$</td>' +
-              '<td style="color:var(--sub)">' + h.fee_usd.toFixed(3) + '$</td>' +
-              '<td><span class="badge">' + h.reason + '</span></td>' +
-              '<td>' + h.exit_time + '</td>' +
-            '</tr>';
-          }});
-          var hTable = document.getElementById(pfx+'-history-table');
-          if(hTable) hTable.querySelector('tbody').innerHTML = hHtml || '<tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات مغلقة مؤرشفة</td></tr>';
-        }}).catch(function(e){{}});
-
-      }}catch(err){{}}
-    }});
-
-    var wHtml = '';
-    (d.wallet_assets||[]).forEach(function(a){{
-      var canSell = a.asset !== 'USDT' && a.free > 0;
-      var priceStr = a.asset === 'USDT' ? '1.00 $' : (a.usd_price > 0 ? a.usd_price.toFixed(4) + ' $' : '-');
-      var valStr = a.usd_value > 0 ? a.usd_value.toFixed(2) + ' $' : '0.00 $';
-      
-      wHtml += '<tr>' +
-        '<td><strong>' + a.asset + '</strong></td>' +
-        '<td>' + a.free + '</td>' +
-        '<td style="color:#60a5fa">' + (a.bot_alloc || 0) + '</td>' +
-        '<td style="color:#10b981;font-weight:bold">' + (a.unlinked_free !== undefined ? a.unlinked_free : a.free) + '</td>' +
-        '<td style="color:#38bdf8;font-weight:bold">' + valStr + '</td>' +
-        '<td class="manage-ctrl">' +
-          (canSell ? '<button class="btn" style="background:#f59e0b;color:#000;font-size:10px" onclick="openPanicModal(\\'' + a.asset + '\\', ' + a.free + ', ' + (a.bot_alloc||0) + ', ' + (a.unlinked_free||a.free) + ')">🔥 تسييل</button>' : '-') +
-        '</td>' +
-      '</tr>';
-    }});
-    var wTable = document.getElementById('w-table');
-    if(wTable){{
-      wTable.querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="6" style="text-align:center">لا توجد أرصدة</td></tr>';
-    }}
-
-    var ordHtml = '';
-    (d.open_limit_orders || []).forEach(function(o){{
-      ordHtml += '<tr>' +
-        '<td><strong>' + o.symbol + '</strong></td>' +
-        '<td style="color:' + (o.side==='BUY'?'var(--success)':'var(--danger)') + ';font-weight:bold">' + o.side + '</td>' +
-        '<td>' + parseFloat(o.price) + '$</td>' +
-        '<td>' + parseFloat(o.origQty) + '</td>' +
-        '<td>' + new Date(o.time).toLocaleTimeString() + '</td>' +
-        '<td class="manage-ctrl"><button class="icon-btn" style="background:#dc2626;color:#fff" title="إلغاء" onclick="cancelLimitOrder(\\'' + o.symbol + '\\', \\'' + o.orderId + '\\')">❌</button></td>' +
-      '</tr>';
-    }});
-    var limitTable = document.getElementById('limit-orders-table');
-    if(limitTable){{
-      limitTable.querySelector('tbody').innerHTML = ordHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أوامر معلقة</td></tr>';
-    }}
-
-    rawLogs = d.recent_logs || [];
-    renderLogs();
-  }}catch(e){{}}
-}}
-setInterval(update, 2000);
-update();
-</script>
-</body>
-</html>"""
-    return header_and_tabs
-
-# =====================================================================
-# 🛡️ خادم الويب ومسارات الرادار والقناص
-# =====================================================================
 class WebHandler(http.server.BaseHTTPRequestHandler):
     def is_auth(self):
         c = cookies.SimpleCookie(self.headers.get('Cookie'))
@@ -1465,7 +680,6 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps(shared_state, ensure_ascii=False).encode('utf-8'))
         
-        # 📡 مسار سكانر العملات الصاعدة (Top Gainers)
         elif self.path == '/api/scanner':
             try:
                 url = f"{BASE_URL}/api/v3/ticker/24hr"
@@ -1480,11 +694,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     top_gainers = usdt_tickers[:14]
                     self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
                     self.wfile.write(json.dumps(top_gainers, ensure_ascii=False).encode('utf-8'))
-            except Exception as e:
+            except Exception:
                 self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
                 self.wfile.write(b"[]")
 
-        # 🎯 مسار بيانات صفقات القناص المستقلة
         elif self.path == '/api/sniper_data':
             res_data = {
                 "positions": shared_state.get("sniper_positions", []),
@@ -1500,6 +713,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             ok, ords = mexc_private_request("/api/v3/allOrders", params={"symbol": sym, "limit": 40})
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps(ords if ok else [], ensure_ascii=False).encode('utf-8'))
+
         elif self.path.startswith('/api/history'):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
@@ -1507,6 +721,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             trades = database.get_closed_trades(bot_name)
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps(trades, ensure_ascii=False).encode('utf-8'))
+
         elif self.path == '/sniper':
             try:
                 with open("sniper.html", "r", encoding="utf-8") as f:
@@ -1515,14 +730,27 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(html_c.encode('utf-8'))
             except Exception:
                 self.send_response(404); self.end_headers()
+
         elif self.path == '/analytics':
-            self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
-            self.wfile.write(ANALYTICS_HTML.encode('utf-8'))
+            try:
+                with open("analytics.html", "r", encoding="utf-8") as f:
+                    html_c = f.read()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(html_c.encode('utf-8'))
+            except Exception:
+                self.send_response(404); self.end_headers()
+
         elif self.path == '/api/logout':
             self.send_response(200); self.send_header('Set-Cookie', 'session_id=; Path=/; Max-Age=0'); self.end_headers()
+
         else:
-            self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
-            self.wfile.write(get_complete_dashboard().encode('utf-8'))
+            try:
+                with open("dashboard.html", "r", encoding="utf-8") as f:
+                    html_c = f.read()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(html_c.encode('utf-8'))
+            except Exception:
+                self.send_response(404); self.end_headers()
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -1543,7 +771,6 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
         if not self.is_auth():
             self.send_response(401); self.end_headers(); return
 
-        # 🎯 تنفيذ أمر قنص مستقل
         if self.path == '/api/sniper_buy':
             sym = data.get("symbol")
             size = float(data.get("size", 10.0))
@@ -1580,16 +807,13 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
-        # 🎯 إغلاق صفقة قناص يدوياً
         elif self.path == '/api/sniper_close':
             s_id = data.get("id")
             sym = data.get("symbol")
             bid, ask = get_orderbook(sym)
             base_asset = sym.replace("USDT", "").replace("USDC", "")
-            found = False
             for sp in shared_state.get("sniper_positions", []):
                 if sp["id"] == s_id:
-                    found = True
                     avail = get_asset_free_balance(base_asset)
                     sell_qty = min(sp["qty"], avail)
                     if float(format_quantity(sym, sell_qty)) > 0:
