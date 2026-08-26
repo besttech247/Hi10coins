@@ -73,6 +73,22 @@ def init_db():
     )
     """)
 
+    # جدول صفقات القناص المستقلة
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS sniper_trades (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        entry_price REAL NOT NULL,
+        highest_price REAL NOT NULL,
+        qty REAL NOT NULL,
+        tp_pct REAL DEFAULT 0.03,
+        sl_pct REAL DEFAULT 0.015,
+        trailing_cb REAL DEFAULT 0.008,
+        is_break_even INTEGER DEFAULT 0,
+        time_str TEXT NOT NULL
+    )
+    """)
+
     default_pass = hashlib.sha256("admin123".encode('utf-8')).hexdigest()
     cursor.execute("INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'admin', ?)", (default_pass,))
     cursor.execute("INSERT OR IGNORE INTO exchange_keys (id, api_key, api_secret) VALUES (1, '', '')")
@@ -167,6 +183,48 @@ def delete_active_trade(trade_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM active_trades WHERE id = ?", (trade_id,))
+    conn.commit()
+    conn.close()
+
+def load_sniper_trades():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM sniper_trades")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def insert_sniper_trade(trade):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT OR REPLACE INTO sniper_trades (id, symbol, entry_price, highest_price, qty, tp_pct, sl_pct, trailing_cb, is_break_even, time_str)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        trade["id"], trade["symbol"], trade["entry_price"],
+        trade.get("highest_price", trade["entry_price"]), trade["qty"],
+        trade.get("tp_pct", 0.03), trade.get("sl_pct", 0.015),
+        trade.get("trailing_cb", 0.008), trade.get("is_break_even", 0),
+        trade["time_str"]
+    ))
+    conn.commit()
+    conn.close()
+
+def update_sniper_trade(trade_id, updates):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    fields = [f"{k} = ?" for k in updates.keys()]
+    values = list(updates.values())
+    values.append(trade_id)
+    cursor.execute(f"UPDATE sniper_trades SET {', '.join(fields)} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
+
+def delete_sniper_trade(trade_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM sniper_trades WHERE id = ?", (trade_id,))
     conn.commit()
     conn.close()
 
