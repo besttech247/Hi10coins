@@ -29,6 +29,7 @@ def init_db():
         bot_name TEXT UNIQUE NOT NULL,
         display_name TEXT NOT NULL,
         symbols TEXT DEFAULT 'SOLUSDT, BTCUSDT, ETHUSDT',
+        order_exec_type TEXT DEFAULT 'MARKET',
         max_allocation_usdt REAL DEFAULT 50.0,
         max_concurrent_per_coin INTEGER DEFAULT 1,
         trade_size_usdt REAL DEFAULT 10.0,
@@ -55,25 +56,40 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS closed_trades (
+        id TEXT PRIMARY KEY,
+        bot_name TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        entry_price REAL NOT NULL,
+        exit_price REAL NOT NULL,
+        qty REAL NOT NULL,
+        gross_pnl REAL NOT NULL,
+        fee_usd REAL NOT NULL,
+        net_pnl REAL NOT NULL,
+        reason TEXT NOT NULL,
+        entry_time TEXT NOT NULL,
+        exit_time TEXT NOT NULL
+    )
+    """)
+
     default_pass = hashlib.sha256("admin123".encode('utf-8')).hexdigest()
     cursor.execute("INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'admin', ?)", (default_pass,))
     cursor.execute("INSERT OR IGNORE INTO exchange_keys (id, api_key, api_secret) VALUES (1, '', '')")
 
-    # 3 عملات افتراضية ذات سيولة عالية
     default_3_symbols = "SOLUSDT, BTCUSDT, ETHUSDT"
-
     bots = [
-        (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', default_3_symbols, 50.0, 1, 10.0, '5m', 0.025, 0.012, 0, 'PAUSED'),
-        (2, 'BOT_2A', '⚡ Bot 2A (EWO Scalp 15m)', default_3_symbols, 50.0, 1, 10.0, '15m', 0.025, 0.012, 0, 'PAUSED'),
-        (3, 'BOT_2B', '⚡ Bot 2B (EWO Swing 1h)', default_3_symbols, 50.0, 1, 10.0, '60m', 0.035, 0.015, 0, 'PAUSED'),
-        (4, 'BOT_2C', '⚡ Bot 2C (EWO Custom TF)', default_3_symbols, 50.0, 1, 10.0, '5m', 0.020, 0.010, 0, 'PAUSED'),
-        (5, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Trailing)', 'BTCUSDT, ETHUSDT', 50.0, 1, 10.0, '1m', 0.025, 0.012, 1, 'PAUSED')
+        (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.025, 0.012, 0, 'PAUSED'),
+        (2, 'BOT_2A', '⚡ Bot 2A (Scalp 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.012, 0, 'PAUSED'),
+        (3, 'BOT_2B', '⚡ Bot 2B (Swing 1h)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '60m', 0.035, 0.015, 0, 'PAUSED'),
+        (4, 'BOT_2C', '⚡ Bot 2C (Custom TF)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.020, 0.010, 0, 'PAUSED'),
+        (5, 'BOT_3', '🎯 Bot 3 (Manual Trigger)', 'BTCUSDT, ETHUSDT', 'MARKET', 50.0, 1, 10.0, '1m', 0.025, 0.012, 1, 'PAUSED')
     ]
 
     for b in bots:
         cursor.execute("""
-        INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, order_exec_type, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, b)
 
     conn.commit()
@@ -153,6 +169,33 @@ def delete_active_trade(trade_id):
     cursor.execute("DELETE FROM active_trades WHERE id = ?", (trade_id,))
     conn.commit()
     conn.close()
+
+def archive_closed_trade(trade):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO closed_trades (id, bot_name, symbol, entry_price, exit_price, qty, gross_pnl, fee_usd, net_pnl, reason, entry_time, exit_time)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        trade["id"], trade["bot_name"], trade["symbol"], trade["entry_price"],
+        trade["exit_price"], trade["qty"], trade["gross_pnl"], trade["fee_usd"],
+        trade["net_pnl"], trade["reason"], trade["entry_time"], trade["exit_time"]
+    ))
+    cursor.execute("DELETE FROM active_trades WHERE id = ?", (trade["id"],))
+    conn.commit()
+    conn.close()
+
+def get_closed_trades(bot_name=None, limit=50):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if bot_name:
+        cursor.execute("SELECT * FROM closed_trades WHERE bot_name = ? ORDER BY exit_time DESC LIMIT ?", (bot_name, limit))
+    else:
+        cursor.execute("SELECT * FROM closed_trades ORDER BY exit_time DESC LIMIT ?", (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 def verify_user(username, password):
     pass_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
