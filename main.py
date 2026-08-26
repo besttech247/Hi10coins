@@ -389,7 +389,6 @@ def trading_engine_loop():
 
             refresh_wallet_and_prices()
 
-            # 🎯 متابعة صفقات القناص
             still_snipers = []
             for sp in shared_state.get("sniper_positions", []):
                 sym = sp["symbol"]
@@ -414,7 +413,7 @@ def trading_engine_loop():
                 if not sp.get("is_break_even") and (highest >= entry * (1.0 + (sp.get("tp_pct", 0.03) * 0.5))):
                     sp["is_break_even"] = 1
                     database.update_sniper_trade(sp["id"], {"is_break_even": 1})
-                    add_log(f"🛡️ [Sniper] تأمين صفقة {sym} بنقل الوقف لسعر الدخول (Break-Even)", "system", "success")
+                    add_log(f"🛡️ [Sniper] تأمين صفقة {sym} بنقل الوقف لسعر الدخول", "system", "success")
 
                 effective_sl = entry if sp.get("is_break_even") else sl_price
                 cb_pct = sp.get("trailing_cb", 0.008)
@@ -454,7 +453,6 @@ def trading_engine_loop():
 
             shared_state["sniper_positions"] = still_snipers
 
-            # متابعة بقية البوتات
             configs = {k: database.get_bot_config(k) for k in BOT_KEYS}
             for bKey, cfg in configs.items():
                 syms = parse_symbols_list(cfg.get("symbols", ""))
@@ -662,6 +660,35 @@ def trading_engine_loop():
 
         time.sleep(7)
 
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>دخول</title>
+<style>
+body{background:#090d16;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.box{background:#111827;padding:24px;border-radius:12px;width:300px;border:1px solid #1f293d}
+input{width:100%;padding:10px;margin:8px 0;background:#090d16;border:1px solid #1f293d;color:#fff;border-radius:6px;box-sizing:border-box}
+button{width:100%;padding:10px;background:#3b82f6;color:#fff;border:none;border-radius:6px;font-weight:bold;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="box">
+  <h3 style="text-align:center;margin-bottom:12px">🔐 تسجيل الدخول</h3>
+  <form id="f">
+    <input type="text" id="u" placeholder="اسم المستخدم" required>
+    <input type="password" id="p" placeholder="كلمة المرور" required>
+    <button type="submit">دخول</button>
+  </form>
+</div>
+<script>
+document.getElementById('f').onsubmit=async(e)=>{
+  e.preventDefault();
+  const r=await fetch('/api/login',{method:'POST',body:JSON.stringify({username:u.value,password:p.value})});
+  if(r.ok) location.href='/'; else alert('خطأ في بيانات الدخول');
+};
+</script>
+</body>
+</html>"""
+
 class WebHandler(http.server.BaseHTTPRequestHandler):
     def is_auth(self):
         c = cookies.SimpleCookie(self.headers.get('Cookie'))
@@ -729,7 +756,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
                 self.wfile.write(html_c.encode('utf-8'))
             except Exception:
-                self.send_response(404); self.end_headers()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(b"<h3>sniper.html not found. Please create the file.</h3><a href='/'>Back</a>")
 
         elif self.path == '/analytics':
             try:
@@ -738,7 +766,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
                 self.wfile.write(html_c.encode('utf-8'))
             except Exception:
-                self.send_response(404); self.end_headers()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(b"<h3>analytics.html not found. Please create the file.</h3><a href='/'>Back</a>")
 
         elif self.path == '/api/logout':
             self.send_response(200); self.send_header('Set-Cookie', 'session_id=; Path=/; Max-Age=0'); self.end_headers()
@@ -750,7 +779,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
                 self.wfile.write(html_c.encode('utf-8'))
             except Exception:
-                self.send_response(404); self.end_headers()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(b"<h3>dashboard.html not found. Please create the file.</h3>")
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
