@@ -28,15 +28,15 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         bot_name TEXT UNIQUE NOT NULL,
         display_name TEXT NOT NULL,
-        symbols TEXT DEFAULT 'NEARUSDT, AVAXUSDT, SOLUSDT',
-        max_allocation_usdt REAL DEFAULT 100.0,
-        max_concurrent_per_coin INTEGER DEFAULT 3,
+        symbols TEXT DEFAULT 'SOLUSDT, BTCUSDT, ETHUSDT',
+        max_allocation_usdt REAL DEFAULT 50.0,
+        max_concurrent_per_coin INTEGER DEFAULT 1,
         trade_size_usdt REAL DEFAULT 10.0,
-        timeframe TEXT DEFAULT '5m',
-        tp_pct REAL DEFAULT 0.015,
-        sl_pct REAL DEFAULT 0.005,
+        timeframe TEXT DEFAULT '15m',
+        tp_pct REAL DEFAULT 0.025,
+        sl_pct REAL DEFAULT 0.012,
         trailing_stop INTEGER DEFAULT 0,
-        trailing_cb REAL DEFAULT 0.003,
+        trailing_cb REAL DEFAULT 0.005,
         status TEXT DEFAULT 'PAUSED'
     )
     """)
@@ -49,8 +49,8 @@ def init_db():
         entry_price REAL NOT NULL,
         highest_price REAL NOT NULL,
         qty REAL NOT NULL,
-        tp_pct REAL DEFAULT 0.015,
-        sl_pct REAL DEFAULT 0.005,
+        tp_pct REAL DEFAULT 0.025,
+        sl_pct REAL DEFAULT 0.012,
         time_str TEXT NOT NULL
     )
     """)
@@ -59,24 +59,22 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'admin', ?)", (default_pass,))
     cursor.execute("INSERT OR IGNORE INTO exchange_keys (id, api_key, api_secret) VALUES (1, '', '')")
 
-    # تهيئة البوتات الثلاثة بالحالة الافتراضية PAUSED
-    default_symbols_b1_b2 = "NEARUSDT, AVAXUSDT, SOLUSDT, DOGEUSDT, BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, ADAUSDT, LINKUSDT"
-    default_symbols_b3 = "BTCUSDT, ETHUSDT"  # عملتين فقط لـ Bot 3
+    # 3 عملات افتراضية ذات سيولة عالية
+    default_3_symbols = "SOLUSDT, BTCUSDT, ETHUSDT"
 
-    cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', ?, 100.0, 3, 10.0, '5m', 0.015, 0.0049, 0, 'PAUSED')
-    """, (default_symbols_b1_b2,))
-    
-    cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (2, 'BOT_2', '⚡ Bot 2 (EWO Custom TF)', ?, 100.0, 3, 10.0, '15m', 0.02, 0.006, 0, 'PAUSED')
-    """, (default_symbols_b1_b2,))
+    bots = [
+        (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', default_3_symbols, 50.0, 1, 10.0, '5m', 0.025, 0.012, 0, 'PAUSED'),
+        (2, 'BOT_2A', '⚡ Bot 2A (EWO Scalp 15m)', default_3_symbols, 50.0, 1, 10.0, '15m', 0.025, 0.012, 0, 'PAUSED'),
+        (3, 'BOT_2B', '⚡ Bot 2B (EWO Swing 1h)', default_3_symbols, 50.0, 1, 10.0, '60m', 0.035, 0.015, 0, 'PAUSED'),
+        (4, 'BOT_2C', '⚡ Bot 2C (EWO Custom TF)', default_3_symbols, 50.0, 1, 10.0, '5m', 0.020, 0.010, 0, 'PAUSED'),
+        (5, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Trailing)', 'BTCUSDT, ETHUSDT', 50.0, 1, 10.0, '1m', 0.025, 0.012, 1, 'PAUSED')
+    ]
 
-    cursor.execute("""
-    INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
-    VALUES (3, 'BOT_3', '🎯 Bot 3 (Manual Trigger + Auto Bracket)', ?, 100.0, 3, 10.0, '1m', 0.015, 0.005, 1, 'PAUSED')
-    """, (default_symbols_b3,))
+    for b in bots:
+        cursor.execute("""
+        INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, b)
 
     conn.commit()
     conn.close()
@@ -134,7 +132,7 @@ def insert_active_trade(trade):
     """, (
         trade["id"], trade["bot_name"], trade["symbol"], trade["entry_price"],
         trade.get("highest_price", trade["entry_price"]), trade["qty"],
-        trade.get("tp_pct", 0.015), trade.get("sl_pct", 0.005), trade["time_str"]
+        trade.get("tp_pct", 0.025), trade.get("sl_pct", 0.012), trade["time_str"]
     ))
     conn.commit()
     conn.close()
