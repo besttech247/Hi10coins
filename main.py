@@ -251,8 +251,8 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
 
 def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
     g_settings = database.get_global_settings()
-    max_chase_secs = g_settings.get("chase_timeout", 12)
-    recheck_interval = g_settings.get("chase_interval", 2.0)
+    max_chase_secs = int(g_settings.get("chase_timeout", 12))
+    interval_secs = float(g_settings.get("chase_interval", 2.0))
 
     bid, ask = get_orderbook(symbol)
     if not bid or not ask:
@@ -269,7 +269,7 @@ def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
     start_t = time.time()
     
     while time.time() - start_t < max_chase_secs:
-        time.sleep(recheck_interval)
+        time.sleep(interval_secs)
         cur_bid, cur_ask = get_orderbook(symbol)
         best_price = cur_bid if side.upper() == "BUY" else cur_ask
         
@@ -393,7 +393,7 @@ def trading_engine_loop():
 
             refresh_wallet_and_prices()
 
-            # 🎯 متابعة صفقات القناص المستقلة مع الأهداف المتعددة (TP1 بيع 50% وتأمين الدخول)
+            # 🎯 متابعة صفقات القناص المستقلة مع الأهداف المتعددة (TP1 / TP2 / Trailing Stop)
             still_snipers = []
             for sp in shared_state.get("sniper_positions", []):
                 sym = sp["symbol"]
@@ -416,7 +416,7 @@ def trading_engine_loop():
                 tp2_price = entry * (1.0 + sp.get("tp2_pct", 0.04))
                 sl_price = entry * (1.0 - sp.get("sl_pct", 0.015))
 
-                # تحقيق الهدف الأول TP1: بيع نصف الكمية وتأمين الوقف على نقطة الدخول (Break-even)
+                # تحقيق الهدف الأول TP1: بيع 50% وتأمين الباقي على نقطة الدخول (Break-even)
                 if not sp.get("tp1_hit") and (highest >= tp1_price):
                     half_qty = float(format_quantity(sym, sp["qty"] * 0.5))
                     if half_qty > 0:
@@ -425,16 +425,6 @@ def trading_engine_loop():
                             sp["tp1_hit"] = 1
                             sp["qty"] -= half_qty
                             database.update_sniper_trade(sp["id"], {"tp1_hit": 1, "qty": sp["qty"]})
-                            gross_pnl = (bid - entry) * half_qty
-                            fee_usd = (entry * half_qty * 0.001) + (bid * half_qty * 0.001)
-                            net_pnl = gross_pnl - fee_usd
-                            database.archive_closed_trade({
-                                "id": f"{sp['id']}_tp1", "bot_name": "SNIPER", "symbol": sym,
-                                "entry_price": entry, "exit_price": bid,
-                                "qty": half_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
-                                "net_pnl": net_pnl, "reason": "🎯 TP1 (بيع 50% وتأمين الدخول)",
-                                "entry_time": sp["time_str"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
-                            })
                             add_log(f"🎯 [Sniper] تحقيق هدف TP1 لـ {sym} | بيع 50% وتأمين الباقي على الدخول", "sells", "success")
 
                 effective_sl = entry if sp.get("tp1_hit") else sl_price
@@ -650,10 +640,15 @@ def trading_engine_loop():
                                     database.delete_active_trade(pos['id'])
                                     continue
 
-                                ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+                                if exec_type == "CHASE_LIMIT":
+                                    ok, res = execute_smart_chase_order(sym, "SELL", qty=sell_qty)
+                                else:
+                                    ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+
                                 if ok:
                                     gross_pnl = (bid - entry) * sell_qty
-                                    fee_usd = (entry * sell_qty * 0.001) + (bid * sell_qty * 0.001)
+                                    fee_rate = 0.0 if exec_type == "CHASE_LIMIT" else 0.001
+                                    fee_usd = (entry * sell_qty * fee_rate) + (bid * sell_qty * fee_rate)
                                     net_pnl = gross_pnl - fee_usd
 
                                     shared_state["bots"]["BOT_3"]["daily_pnl"] += net_pnl
@@ -730,11 +725,17 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps(shared_state, ensure_ascii=False).encode('utf-8'))
         
+        elif self.path == '/api/get_global_settings':
+            settings = database.get_global_settings()
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps(settings, ensure_ascii=False).encode('utf-8'))
+
         elif self.path.startswith('/api/scanner'):
             try:
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)
                 sort_mode = params.get("sort", ["price"])[0]
+                min_vol = float(params.get("min_vol", [50000])[0])
                 limit = int(params.get("limit", [4])[0])
 
                 url = f"{BASE_URL}/api/v3/ticker/24hr"
@@ -743,7 +744,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     tickers = json.loads(res.read().decode('utf-8'))
                     usdt_tickers = [
                         t for t in tickers 
-                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= 30000
+                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= min_vol
                     ]
                     if sort_mode == "volume":
                         usdt_tickers.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
@@ -789,7 +790,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(html_c.encode('utf-8'))
             except Exception:
                 self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
-                self.wfile.write(b"<h3>sniper.html not found. Please create the file.</h3><a href='/'>Back</a>")
+                self.wfile.write(b"<h3>sniper.html not found.</h3><a href='/'>Back</a>")
 
         elif self.path == '/analytics':
             try:
@@ -799,7 +800,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(html_c.encode('utf-8'))
             except Exception:
                 self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
-                self.wfile.write(b"<h3>analytics.html not found. Please create the file.</h3><a href='/'>Back</a>")
+                self.wfile.write(b"<h3>analytics.html not found.</h3><a href='/'>Back</a>")
 
         elif self.path == '/api/logout':
             self.send_response(200); self.send_header('Set-Cookie', 'session_id=; Path=/; Max-Age=0'); self.end_headers()
@@ -812,7 +813,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(html_c.encode('utf-8'))
             except Exception:
                 self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
-                self.wfile.write(b"<h3>dashboard.html not found. Please create the file.</h3>")
+                self.wfile.write(b"<h3>dashboard.html not found.</h3>")
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -833,7 +834,15 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
         if not self.is_auth():
             self.send_response(401); self.end_headers(); return
 
-        if self.path == '/api/sniper_buy':
+        if self.path == '/api/save_global_settings':
+            timeout = data.get("chase_timeout", 12)
+            interval = data.get("chase_interval", 2.0)
+            database.save_global_settings(timeout, interval)
+            add_log(f"⚙️ تم تحديث إعدادات التتبع: مهلة {timeout}s | فاصل {interval}s", "system", "info")
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": "✅ تم حفظ الإعدادات بنجاح!"}, ensure_ascii=False).encode('utf-8'))
+
+        elif self.path == '/api/sniper_buy':
             sym = data.get("symbol")
             size = float(data.get("size", 10.0))
             o_type = data.get("order_type", "CHASE_LIMIT")
@@ -871,30 +880,6 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
-        elif self.path == '/api/sniper_edit':
-            s_id = data.get("id")
-            updates = {
-                "entry_price": float(data.get("entry_price", 0.0)),
-                "qty": float(data.get("qty", 0.0)),
-                "tp1_pct": float(data.get("tp1_pct", 0.02)),
-                "sl_pct": float(data.get("sl_pct", 0.015))
-            }
-            database.update_sniper_trade(s_id, updates)
-            for p in shared_state.get("sniper_positions", []):
-                if p["id"] == s_id:
-                    p.update(updates)
-            add_log(f"✏️ تم تعديل صفقة القناص {s_id}", "system", "info")
-            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
-            self.wfile.write(json.dumps({"msg": "✅ تم التعديل"}, ensure_ascii=False).encode('utf-8'))
-
-        elif self.path == '/api/sniper_unlink':
-            s_id = data.get("id")
-            database.delete_sniper_trade(s_id)
-            shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["id"] != s_id]
-            add_log(f"🚫 تم فك ربط صفقة القناص {s_id}", "system", "warning")
-            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
-            self.wfile.write(json.dumps({"msg": "✅ تم فك الربط"}, ensure_ascii=False).encode('utf-8'))
-
         elif self.path == '/api/sniper_close':
             s_id = data.get("id")
             sym = data.get("symbol")
@@ -924,13 +909,27 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": "✅ تم إغلاق وتسييل صفقة القناص"}, ensure_ascii=False).encode('utf-8'))
 
-        elif self.path == '/api/save_global_settings':
-            t_out = data.get("chase_timeout", 12)
-            interval = data.get("chase_interval", 2.0)
-            database.save_global_settings(t_out, interval)
-            add_log(f"تم حفظ إعدادات المطاردة: Timeout={t_out}s, Interval={interval}s", "system", "info")
+        elif self.path == '/api/sniper_edit':
+            s_id = data.get("id")
+            updates = {
+                "entry_price": float(data.get("entry_price", 0.0)),
+                "qty": float(data.get("qty", 0.0)),
+                "tp1_pct": float(data.get("tp1_pct", 0.02)),
+                "sl_pct": float(data.get("sl_pct", 0.015))
+            }
+            database.update_sniper_trade(s_id, updates)
+            for sp in shared_state.get("sniper_positions", []):
+                if sp["id"] == s_id:
+                    sp.update(updates)
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
-            self.wfile.write(json.dumps({"msg": "✅ تم الحفظ"}, ensure_ascii=False).encode('utf-8'))
+            self.wfile.write(json.dumps({"msg": "✅ تم حفظ التعديل"}, ensure_ascii=False).encode('utf-8'))
+
+        elif self.path == '/api/sniper_unlink':
+            s_id = data.get("id")
+            database.delete_sniper_trade(s_id)
+            shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["id"] != s_id]
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": "✅ تم فك الربط"}, ensure_ascii=False).encode('utf-8'))
 
         elif self.path == '/api/change_password':
             new_p = data.get("new_password", "").strip()
@@ -1009,10 +1008,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             b_name = data.get("bot_name", "BOT_1")
             cfg = database.get_bot_config(b_name)
             size = float(cfg.get("trade_size_usdt", 10.0))
+            exec_type = cfg.get("order_exec_type", "CHASE_LIMIT")
             bid, ask = get_orderbook(sym)
             if ask:
                 q = float(format_quantity(sym, size / ask))
-                exec_type = cfg.get("order_exec_type", "CHASE_LIMIT")
                 if exec_type == "CHASE_LIMIT":
                     ok, res = execute_smart_chase_order(sym, "BUY", quote_qty=size)
                 else:
@@ -1035,7 +1034,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                         'id': trade_id, 'entry_price': ask, 'highest_price': ask, 'qty': q,
                         'tp_pct': t_obj['tp_pct'], 'sl_pct': t_obj['sl_pct'], 'time': time_str
                     })
-                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {ask}$"
+                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {ask}$ ({exec_type})"
                     add_log(msg, "buys", "primary")
                 else: msg = f"❌ فشل الشراء: {res}"
             else: msg = "فشل قراءة السعر"
@@ -1058,7 +1057,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     sell_qty = min(p['qty'], avail)
 
                     if float(format_quantity(sym, sell_qty)) > 0:
-                        ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+                        ok, res = place_order(sym, "SELL", qty=sell_qty)
                         cur_price = bid if bid else p['entry_price']
                         gross_pnl = (cur_price - p['entry_price']) * sell_qty
                         fee_usd = (p['entry_price'] * sell_qty * 0.001) + (cur_price * sell_qty * 0.001)
@@ -1139,8 +1138,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                         for sp in shared_state.get("sniper_positions", []):
                             if sp["symbol"] == sym:
                                 database.delete_sniper_trade(sp["id"])
-                        shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["symbol"] != sym]
-                        msg = f"✅ تم تسييل كامل الرصيد ({free_qty} {asset})"
+                        shared_state["sniper_positions"] = [sp for sp in shared_state.get("sniper_positions", []) if sp["symbol"] != sym]
+                        msg = f"✅ تم تسييل كامل الرصيد ({free_qty} {asset}) وتصفير الصفقات"
                     else:
                         msg = f"❌ فشل: {res}"
                 else:
@@ -1214,8 +1213,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                         for sp in shared_state.get("sniper_positions", []):
                             if sp["symbol"] == sym:
                                 database.delete_sniper_trade(sp["id"])
-                        shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["symbol"] != sym]
-            msg = f"✅ تم تسييل {sold_count} عملات إلى USDT" if sold_count > 0 else "لا توجد عملات متاحة"
+                        shared_state["sniper_positions"] = [sp for sp in shared_state.get("sniper_positions", []) if sp["symbol"] != sym]
+            msg = f"✅ تم تسييل {sold_count} عملات إلى USDT وتصفير كافة الصفقات" if sold_count > 0 else "لا توجد عملات متاحة"
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
