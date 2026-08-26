@@ -249,7 +249,11 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
         add_log(f"❌ خطأ {symbol}: {res}", "orders", "danger")
     return ok, res
 
-def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None, max_chase_secs=12):
+def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
+    g_settings = database.get_global_settings()
+    max_chase_secs = g_settings.get("chase_timeout", 12)
+    recheck_interval = g_settings.get("chase_interval", 2.0)
+
     bid, ask = get_orderbook(symbol)
     if not bid or not ask:
         return place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
@@ -265,7 +269,7 @@ def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None, max_chase_
     start_t = time.time()
     
     while time.time() - start_t < max_chase_secs:
-        time.sleep(2.5)
+        time.sleep(recheck_interval)
         cur_bid, cur_ask = get_orderbook(symbol)
         best_price = cur_bid if side.upper() == "BUY" else cur_ask
         
@@ -389,7 +393,7 @@ def trading_engine_loop():
 
             refresh_wallet_and_prices()
 
-            # 🎯 متابعة صفقات القناص المستقلة (Break-even & Trailing Stop)
+            # 🎯 متابعة صفقات القناص المستقلة مع الأهداف المتعددة (TP1 بيع 50% وتأمين الدخول)
             still_snipers = []
             for sp in shared_state.get("sniper_positions", []):
                 sym = sp["symbol"]
@@ -408,28 +412,42 @@ def trading_engine_loop():
                     sp["highest_price"] = highest
                     database.update_sniper_trade(sp["id"], {"highest_price": highest})
 
-                tp_price = entry * (1.0 + sp.get("tp_pct", 0.03))
+                tp1_price = entry * (1.0 + sp.get("tp1_pct", 0.02))
+                tp2_price = entry * (1.0 + sp.get("tp2_pct", 0.04))
                 sl_price = entry * (1.0 - sp.get("sl_pct", 0.015))
 
-                # ميزة Break-Even: إذا حقق السعر نصف هدف الـ TP، يتم تأمين الصفقة على سعر الدخول
-                if not sp.get("is_break_even") and (highest >= entry * (1.0 + (sp.get("tp_pct", 0.03) * 0.5))):
-                    sp["is_break_even"] = 1
-                    database.update_sniper_trade(sp["id"], {"is_break_even": 1})
-                    add_log(f"🛡️ [Sniper] تأمين صفقة {sym} بنقل الوقف لسعر الدخول (Break-Even)", "system", "success")
+                # تحقيق الهدف الأول TP1: بيع نصف الكمية وتأمين الوقف على نقطة الدخول (Break-even)
+                if not sp.get("tp1_hit") and (highest >= tp1_price):
+                    half_qty = float(format_quantity(sym, sp["qty"] * 0.5))
+                    if half_qty > 0:
+                        ok, res = place_order(sym, "SELL", qty=half_qty, order_type="MARKET")
+                        if ok:
+                            sp["tp1_hit"] = 1
+                            sp["qty"] -= half_qty
+                            database.update_sniper_trade(sp["id"], {"tp1_hit": 1, "qty": sp["qty"]})
+                            gross_pnl = (bid - entry) * half_qty
+                            fee_usd = (entry * half_qty * 0.001) + (bid * half_qty * 0.001)
+                            net_pnl = gross_pnl - fee_usd
+                            database.archive_closed_trade({
+                                "id": f"{sp['id']}_tp1", "bot_name": "SNIPER", "symbol": sym,
+                                "entry_price": entry, "exit_price": bid,
+                                "qty": half_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "net_pnl": net_pnl, "reason": "🎯 TP1 (بيع 50% وتأمين الدخول)",
+                                "entry_time": sp["time_str"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
+                            })
+                            add_log(f"🎯 [Sniper] تحقيق هدف TP1 لـ {sym} | بيع 50% وتأمين الباقي على الدخول", "sells", "success")
 
-                effective_sl = entry if sp.get("is_break_even") else sl_price
-
-                # ميزة Trailing Stop للقناص
+                effective_sl = entry if sp.get("tp1_hit") else sl_price
                 cb_pct = sp.get("trailing_cb", 0.008)
                 trailing_sl = highest * (1.0 - cb_pct)
-                if highest >= entry * (1.0 + cb_pct):
+                if sp.get("tp1_hit") and highest >= (entry * (1.0 + cb_pct)):
                     effective_sl = max(effective_sl, trailing_sl)
 
-                hit_tp = bid >= tp_price
+                hit_tp2 = bid >= tp2_price
                 hit_sl = bid <= effective_sl
 
-                if hit_tp or hit_sl:
-                    reason = "🎯 TP القناص" if hit_tp else ("🔄 TS القناص" if effective_sl > sl_price else "🛑 SL القناص")
+                if hit_tp2 or hit_sl:
+                    reason = "🎯 TP2 النهائي" if hit_tp2 else ("🔄 TS القناص" if effective_sl > sl_price else "🛑 SL القناص")
                     avail = get_asset_free_balance(base_asset)
                     sell_qty = min(sp["qty"], avail)
 
@@ -447,7 +465,7 @@ def trading_engine_loop():
                                 "entry_time": sp["time_str"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
                             })
                             database.delete_sniper_trade(sp["id"])
-                            add_log(f"💰 [Sniper] إغلاق {sym} | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                            add_log(f"💰 [Sniper] إغلاق نهائي لـ {sym} | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                         else:
                             still_snipers.append(sp)
                     else:
@@ -717,8 +735,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)
                 sort_mode = params.get("sort", ["price"])[0]
-                min_vol = float(params.get("min_vol", [50000])[0])
-                limit = int(params.get("limit", [10])[0])
+                limit = int(params.get("limit", [4])[0])
 
                 url = f"{BASE_URL}/api/v3/ticker/24hr"
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -726,7 +743,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     tickers = json.loads(res.read().decode('utf-8'))
                     usdt_tickers = [
                         t for t in tickers 
-                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= min_vol
+                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= 30000
                     ]
                     if sort_mode == "volume":
                         usdt_tickers.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
@@ -820,7 +837,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             sym = data.get("symbol")
             size = float(data.get("size", 10.0))
             o_type = data.get("order_type", "CHASE_LIMIT")
-            tp_pct = float(data.get("tp_pct", 0.03))
+            tp1_pct = float(data.get("tp1_pct", 0.02))
+            tp2_pct = float(data.get("tp2_pct", 0.04))
             sl_pct = float(data.get("sl_pct", 0.015))
             ts_cb = float(data.get("trailing_cb", 0.008))
 
@@ -837,9 +855,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     time_str = datetime.now(timezone.utc).strftime("%H:%M")
                     snp_trade = {
                         "id": snp_id, "symbol": sym, "entry_price": ask,
-                        "highest_price": ask, "qty": q, "tp_pct": tp_pct,
+                        "highest_price": ask, "qty": q, "orig_qty": q,
+                        "tp1_pct": tp1_pct, "tp2_pct": tp2_pct,
                         "sl_pct": sl_pct, "trailing_cb": ts_cb,
-                        "is_break_even": 0, "time_str": time_str
+                        "tp1_hit": 0, "time_str": time_str
                     }
                     database.insert_sniper_trade(snp_trade)
                     shared_state["sniper_positions"].append(snp_trade)
@@ -851,6 +870,30 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 msg = "تعذر قراءة سعر العملة"
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
+
+        elif self.path == '/api/sniper_edit':
+            s_id = data.get("id")
+            updates = {
+                "entry_price": float(data.get("entry_price", 0.0)),
+                "qty": float(data.get("qty", 0.0)),
+                "tp1_pct": float(data.get("tp1_pct", 0.02)),
+                "sl_pct": float(data.get("sl_pct", 0.015))
+            }
+            database.update_sniper_trade(s_id, updates)
+            for p in shared_state.get("sniper_positions", []):
+                if p["id"] == s_id:
+                    p.update(updates)
+            add_log(f"✏️ تم تعديل صفقة القناص {s_id}", "system", "info")
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": "✅ تم التعديل"}, ensure_ascii=False).encode('utf-8'))
+
+        elif self.path == '/api/sniper_unlink':
+            s_id = data.get("id")
+            database.delete_sniper_trade(s_id)
+            shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["id"] != s_id]
+            add_log(f"🚫 تم فك ربط صفقة القناص {s_id}", "system", "warning")
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": "✅ تم فك الربط"}, ensure_ascii=False).encode('utf-8'))
 
         elif self.path == '/api/sniper_close':
             s_id = data.get("id")
@@ -880,6 +923,14 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["id"] != s_id]
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": "✅ تم إغلاق وتسييل صفقة القناص"}, ensure_ascii=False).encode('utf-8'))
+
+        elif self.path == '/api/save_global_settings':
+            t_out = data.get("chase_timeout", 12)
+            interval = data.get("chase_interval", 2.0)
+            database.save_global_settings(t_out, interval)
+            add_log(f"تم حفظ إعدادات المطاردة: Timeout={t_out}s, Interval={interval}s", "system", "info")
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": "✅ تم الحفظ"}, ensure_ascii=False).encode('utf-8'))
 
         elif self.path == '/api/change_password':
             new_p = data.get("new_password", "").strip()
@@ -961,7 +1012,12 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             bid, ask = get_orderbook(sym)
             if ask:
                 q = float(format_quantity(sym, size / ask))
-                ok, res = place_order(sym, "BUY", qty=q, quote_qty=size)
+                exec_type = cfg.get("order_exec_type", "CHASE_LIMIT")
+                if exec_type == "CHASE_LIMIT":
+                    ok, res = execute_smart_chase_order(sym, "BUY", quote_qty=size)
+                else:
+                    ok, res = place_order(sym, "BUY", qty=q, quote_qty=size, order_type="MARKET")
+                
                 if ok:
                     trade_id = f"{b_name.lower()}_{int(time.time()*1000)}"
                     time_str = datetime.now(timezone.utc).strftime("%H:%M")
@@ -1002,7 +1058,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     sell_qty = min(p['qty'], avail)
 
                     if float(format_quantity(sym, sell_qty)) > 0:
-                        ok, res = place_order(sym, "SELL", qty=sell_qty)
+                        ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
                         cur_price = bid if bid else p['entry_price']
                         gross_pnl = (cur_price - p['entry_price']) * sell_qty
                         fee_usd = (p['entry_price'] * sell_qty * 0.001) + (cur_price * sell_qty * 0.001)
@@ -1080,6 +1136,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                             for p in shared_state["bots"][bKey]["active_positions"].get(sym, []):
                                 database.delete_active_trade(p["id"])
                             shared_state["bots"][bKey]["active_positions"][sym] = []
+                        for sp in shared_state.get("sniper_positions", []):
+                            if sp["symbol"] == sym:
+                                database.delete_sniper_trade(sp["id"])
+                        shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["symbol"] != sym]
                         msg = f"✅ تم تسييل كامل الرصيد ({free_qty} {asset})"
                     else:
                         msg = f"❌ فشل: {res}"
@@ -1151,6 +1211,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                             for p in shared_state["bots"][bKey]["active_positions"].get(sym, []):
                                 database.delete_active_trade(p["id"])
                             shared_state["bots"][bKey]["active_positions"][sym] = []
+                        for sp in shared_state.get("sniper_positions", []):
+                            if sp["symbol"] == sym:
+                                database.delete_sniper_trade(sp["id"])
+                        shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["symbol"] != sym]
             msg = f"✅ تم تسييل {sold_count} عملات إلى USDT" if sold_count > 0 else "لا توجد عملات متاحة"
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
