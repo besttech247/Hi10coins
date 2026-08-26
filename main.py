@@ -25,7 +25,6 @@ ssl_ctx = ssl._create_unverified_context()
 START_TIME = time.time()
 
 SYMBOL_RULES = {}
-# ذاكرة منع التكرار اللحظي: (bot_name, symbol) -> timestamp
 LAST_ENTRY_CANDLE = {}
 
 BOT_KEYS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C", "BOT_3"]
@@ -295,9 +294,6 @@ def refresh_wallet_and_prices():
     except Exception:
         pass
 
-# =====================================================================
-# 🤖 محرك التداول المركزي المحسن والمحمي من التكرار
-# =====================================================================
 def trading_engine_loop():
     fetch_server_ip()
     init_trades_from_db()
@@ -336,7 +332,6 @@ def trading_engine_loop():
                     if s not in shared_state["bots"][bKey]["daily_pnl_coins"]:
                         shared_state["bots"][bKey]["daily_pnl_coins"][s] = 0.0
 
-            # تنفيذ الصفقات
             for bKey in BOT_KEYS:
                 cfg = configs[bKey]
                 if cfg.get("status") == "STOPPED": continue
@@ -346,7 +341,6 @@ def trading_engine_loop():
                 max_alloc = shared_state["bots"][bKey]["max_allocation"]
                 max_con = shared_state["bots"][bKey]["max_concurrent"]
                 
-                # حساب رأس المال المفتوح فعلياً
                 total_open_trades = sum(len(shared_state["bots"][bKey]["active_positions"].get(s, [])) for s in sym_list)
                 current_used_cap = total_open_trades * size
 
@@ -357,7 +351,6 @@ def trading_engine_loop():
                     ask = p_info["ask"]
                     base_asset = sym.replace("USDT", "").replace("USDC", "")
 
-                    # 🤖 منطق Bot 1 و Bot 2A و Bot 2B و Bot 2C
                     if bKey in ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C"]:
                         tf = "5m" if bKey == "BOT_1" else cfg.get("timeframe", "15m")
                         candles = fetch_klines(sym, interval=tf, limit=45)
@@ -380,7 +373,7 @@ def trading_engine_loop():
                                     
                                     hit_tp = bid >= tp_price
                                     hit_sl = bid <= sl_price
-                                    hit_rev = (e2 > 0) and (e1 < e2) and (bid >= pos['entry_price'] * 1.004) # خروج بالانعكاس فقط إذا غطى العمولات
+                                    hit_rev = (e2 > 0) and (e1 < e2) and (bid >= pos['entry_price'] * 1.004)
                                     
                                     if hit_tp or hit_sl or hit_rev:
                                         reason = "🎯 هدف TP" if hit_tp else ("🛑 وقف SL" if hit_sl else "🔄 انعكاس EWO")
@@ -410,7 +403,6 @@ def trading_engine_loop():
                                 
                                 shared_state["bots"][bKey]["active_positions"][sym] = still_pos
 
-                                # شروط الدخول مع منع التكرار اللحظي (Candle Lock)
                                 sig_rebound = (e1 < 0 and e1 > e2 and e2 <= e3)
                                 lock_key = f"{bKey}_{sym}"
                                 is_candle_locked = (LAST_ENTRY_CANDLE.get(lock_key) == latest_candle_time)
@@ -442,7 +434,6 @@ def trading_engine_loop():
                                                 current_used_cap += size
                                                 add_log(f"🚀 [{bKey}] شراء {sym} عند {ask}$ ({len(still_pos)+1}/{max_con})", "buys", "primary")
 
-                    # 🎯 منطق Bot 3 (Manual Trigger + Trailing Bracket)
                     elif bKey == "BOT_3":
                         default_tp_pct = float(cfg.get("tp_pct", 0.025))
                         default_sl_pct = float(cfg.get("sl_pct", 0.012))
@@ -502,46 +493,263 @@ def trading_engine_loop():
         time.sleep(7)
 
 # =====================================================================
-# 🌐 واجهة HTML الرئيسية المحسنة للهاتف
+# 🌐 قوالب HTML المدمجة والمستقرة
 # =====================================================================
-DASHBOARD_HTML = """<!DOCTYPE html>
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>دخول - Command Hub</title>
+<style>
+body{background:#090d16;color:#f3f4f6;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.box{background:#111827;padding:24px;border-radius:12px;width:320px;border:1px solid #1f293d}
+input{width:100%;padding:10px;margin:8px 0;background:#090d16;border:1px solid #1f293d;color:#fff;border-radius:6px;box-sizing:border-box}
+button{width:100%;padding:10px;background:#3b82f6;color:#fff;border:none;border-radius:6px;font-weight:bold;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="box">
+  <h3 style="text-align:center;margin-bottom:12px">🔐 تسجيل الدخول</h3>
+  <form id="f">
+    <input type="text" id="u" placeholder="اسم المستخدم" required>
+    <input type="password" id="p" placeholder="كلمة المرور" required>
+    <button type="submit">دخول</button>
+  </form>
+</div>
+<script>
+document.getElementById('f').onsubmit=async(e)=>{
+  e.preventDefault();
+  const r=await fetch('/api/login',{method:'POST',body:JSON.stringify({username:u.value,password:p.value})});
+  if(r.ok) location.href='/'; else alert('بيانات الدخول غير صحيحة');
+};
+</script>
+</body>
+</html>"""
+
+ANALYTICS_HTML = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>التداول اليدوي</title>
+<style>
+:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--text);padding:12px;line-height:1.5}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px}
+.btn{padding:8px 12px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:12px}
+input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:8px;border-radius:6px;font-size:12px;width:100%}
+.pct-btn{background:#151e30;border:1px solid var(--border);color:var(--sub);padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px}
+</style>
+</head>
+<body>
+  <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <strong>📊 مركز التداول الفوري اليدوي</strong>
+      <div style="font-size:11px;color:var(--sub)">USDT المتاح: <strong id="m-usdt" style="color:#10b981">0.00 $</strong></div>
+    </div>
+    <a href="/" class="btn" style="background:#334155;color:#fff;text-decoration:none">🔙 الرئيسية</a>
+  </div>
+
+  <details open class="card">
+    <summary style="font-weight:bold;cursor:pointer;color:#38bdf8;padding:4px">⚡ لوحة الشراء والبيع اليدوي ▾</summary>
+    <div style="padding-top:10px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div>
+          <label style="font-size:11px;color:var(--sub)">رمز العملة:</label>
+          <input type="text" id="t-sym" placeholder="مثال: SOLUSDT" value="SOLUSDT">
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--sub)">نوع الأمر:</label>
+          <select id="t-type" onchange="document.getElementById('limit-price-box').style.display = this.value === 'LIMIT' ? 'block' : 'none'">
+            <option value="MARKET">سعر السوق (Market)</option>
+            <option value="LIMIT">أمر معلق (Limit)</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="limit-price-box" style="display:none;margin-bottom:8px">
+        <label style="font-size:11px;color:var(--sub)">سعر التنفيذ المطلوب ($):</label>
+        <input type="number" id="t-price" placeholder="أدخل السعر">
+      </div>
+
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <label style="font-size:11px;color:var(--sub)">القيمة بالدولار أو الكمية:</label>
+          <div style="display:flex;gap:4px">
+            <button class="pct-btn" onclick="setPct(0.25)">25%</button>
+            <button class="pct-btn" onclick="setPct(0.50)">50%</button>
+            <button class="pct-btn" onclick="setPct(0.75)">75%</button>
+            <button class="pct-btn" onclick="setPct(1.00)">100%</button>
+          </div>
+        </div>
+        <input type="number" id="t-qty" placeholder="القيمة أو الكمية">
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button class="btn" style="background:#10b981;color:#fff" onclick="execTrade('BUY')">🟢 تنفيذ شراء</button>
+        <button class="btn" style="background:#ef4444;color:#fff" onclick="execTrade('SELL')">🔴 تنفيذ بيع</button>
+      </div>
+    </div>
+  </details>
+
+<script>
+let freeUsdt = 0;
+async function loadBal(){
+  try{
+    const r = await fetch('/api/data');
+    const d = await r.json();
+    freeUsdt = d.real_balance_usdt || 0;
+    document.getElementById('m-usdt').innerText = freeUsdt.toFixed(2) + ' $';
+  }catch(e){}
+}
+loadBal(); setInterval(loadBal, 3000);
+
+function setPct(p){
+  document.getElementById('t-qty').value = (freeUsdt * p).toFixed(2);
+}
+async function execTrade(side){
+  const sym = document.getElementById('t-sym').value.trim().toUpperCase();
+  const type = document.getElementById('t-type').value;
+  const val = parseFloat(document.getElementById('t-qty').value);
+  const price = parseFloat(document.getElementById('t-price').value);
+
+  if(!sym || !val){ alert('يرجى ملء رمز العملة والقيمة'); return; }
+  if(type === 'LIMIT' && (!price || price <= 0)){ alert('يرجى تحديد السعر'); return; }
+
+  const payload = {
+    symbol: sym.endsWith('USDT') ? sym : sym + 'USDT',
+    side: side,
+    order_type: type,
+    val: val,
+    price: price
+  };
+
+  if(confirm(`تأكيد تنفيذ أمر ${side} لـ ${payload.symbol} بقيمة ${val}؟`)){
+    const r = await fetch('/api/terminal_trade', {method:'POST', body:JSON.stringify(payload)});
+    const d = await r.json();
+    alert(d.msg);
+    loadBal();
+  }
+}
+</script>
+</body>
+</html>"""
+
+def get_bot_template_html(b_key, b_name, b_tf, is_b3=False):
+    pfx = b_key.lower()
+    tf_selector = f"""
+    <div>
+      <label style="font-size:10px;color:var(--sub)">الفريم الزمني</label>
+      <select id="{pfx}-tf">
+        <option value="1m" {'selected' if b_tf=='1m' else ''}>1m</option>
+        <option value="5m" {'selected' if b_tf=='5m' else ''}>5m</option>
+        <option value="15m" {'selected' if b_tf=='15m' else ''}>15m</option>
+        <option value="30m" {'selected' if b_tf=='30m' else ''}>30m</option>
+        <option value="60m" {'selected' if b_tf=='60m' else ''}>1h</option>
+      </select>
+    </div>
+    """ if not is_b3 else f"""
+    <div>
+      <label style="font-size:10px;color:var(--sub)">Trailing Stop</label>
+      <select id="{pfx}-ts"><option value="1">مفعّل ✅</option><option value="0">معطّل ❌</option></select>
+    </div>
+    """
+
+    return f"""
+    <div id="t-{pfx}" class="tab-pane">
+      <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+        <span>{b_name}: <strong id="{pfx}-st" style="color:#f59e0b">PAUSED</strong></span>
+        <div style="display:flex;gap:3px">
+          <button class="icon-btn" style="background:var(--success);color:#fff" title="تشغيل" onclick="setSt('{b_key}','RUNNING')">▶️</button>
+          <button class="icon-btn" style="background:#f59e0b;color:#000" title="إيقاف مؤقت" onclick="setSt('{b_key}','PAUSED')">⏸️</button>
+          <button class="icon-btn" style="background:var(--danger);color:#fff" title="إيقاف تام" onclick="setSt('{b_key}','STOPPED')">⏹️</button>
+        </div>
+      </div>
+      
+      <div class="stats-row">
+        <div class="stat-box">
+          <div class="stat-title">أرباح اليوم</div>
+          <div class="stat-val" id="{pfx}-pnl">+0.00$</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-title">نسبة الفوز</div>
+          <div class="stat-val" id="{pfx}-winrate">0%</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-title">السيولة المفتوحة</div>
+          <div class="stat-val" id="{pfx}-cap-used">0$</div>
+        </div>
+      </div>
+
+      <details class="card">
+        <summary style="color:#a78bfa">⚙️ الإعدادات وسقف رأس المال ▾</summary>
+        <div class="form-row" style="padding-top:8px">
+          <div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="{pfx}-alloc" value="50"></div>
+          <div><label style="font-size:10px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="{pfx}-maxcon" value="1"></div>
+          <div><label style="font-size:10px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="{pfx}-size" value="10"></div>
+          <div><label style="font-size:10px;color:var(--sub)">هدف الربح (TP %)</label><input type="number" id="{pfx}-tp" value="2.5" step="0.1"></div>
+          <div><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="{pfx}-sl" value="1.2" step="0.1"></div>
+          {tf_selector}
+          <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('{b_key}', '{pfx}')">💾 حفظ</button></div>
+        </div>
+      </details>
+
+      <details class="card" id="{pfx}-coins-card" open>
+        <summary style="display:flex;justify-content:space-between;align-items:center">
+          <span>📊 جدول العملات وأرباح اليوم</span>
+          <div style="display:flex;gap:3px" onclick="event.stopPropagation()">
+            <button class="btn manage-ctrl" style="background:#10b981;color:#fff;font-size:10px;padding:2px 4px" onclick="addCoinToBot('{b_key}')">➕ إضافة</button>
+            <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('{pfx}-coins-card')">⚙️</button>
+          </div>
+        </summary>
+        <div style="overflow-x:auto;padding-top:6px"><table id="{pfx}-coins-table"><thead><tr><th>العملة</th><th>السعر</th><th>ربح اليوم</th><th>الصفقات</th><th>دخول</th><th class="manage-ctrl">حذف</th></tr></thead><tbody></tbody></table></div>
+      </details>
+
+      <details class="card" id="{pfx}-orders-card" open>
+        <summary style="display:flex;justify-content:space-between;align-items:center">
+          <span>📂 الصفقات المفتوحة (Live PnL)</span>
+          <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('{pfx}-orders-card'); event.stopPropagation();">⚙️</button>
+        </summary>
+        <div style="overflow-x:auto;padding-top:6px"><table id="{pfx}-orders"><thead><tr><th>العملة</th><th>الدخول</th><th>الكمية</th><th>Live PnL</th><th>الوقت</th><th class="manage-ctrl">إجراءات</th></tr></thead><tbody></tbody></table></div>
+      </details>
+    </div>
+    """
+
+DASHBOARD_HTML = f"""<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"><title>MEXC Multi-Bot Hub</title>
 <style>
-:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
-*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
-body{background:var(--bg);color:var(--text);padding:8px;line-height:1.4}
-.header-box{display:flex;justify-content:space-between;align-items:center;padding:10px;background:var(--card);border-radius:10px;border:1px solid var(--border);margin-bottom:8px;flex-wrap:wrap;gap:6px}
-.wallet-bar{display:flex;gap:8px;align-items:center;background:#151e30;padding:4px 8px;border-radius:6px;border:1px solid var(--border)}
-.tabs{display:flex;gap:4px;margin:8px 0;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px}
-.tab{padding:6px 10px;background:#151e30;border:1px solid var(--border);border-radius:6px;color:var(--sub);cursor:pointer;font-weight:bold;white-space:nowrap;font-size:12px}
-.tab.active{background:var(--primary);color:#fff}
-.tab-pane{display:none}
-.tab-pane.active{display:block}
-.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
-.stats-row{display:flex;gap:6px;margin-bottom:8px}
-.stat-box{flex:1;background:#151e30;border:1px solid var(--border);border-radius:8px;padding:6px 4px;text-align:center}
-.stat-title{font-size:10px;color:var(--sub);margin-bottom:2px;white-space:nowrap}
-.stat-val{font-size:14px;font-weight:bold}
-.btn{padding:4px 8px;border:none;border-radius:5px;font-weight:bold;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;justify-content:center;gap:3px}
-.icon-btn{padding:3px 6px;font-size:13px;border-radius:5px;border:none;cursor:pointer}
-table{width:100%;border-collapse:collapse;text-align:right}
-th,td{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}
-th{color:var(--sub)}
-.badge{padding:2px 4px;border-radius:4px;font-size:10px;font-weight:bold}
-.badge-active{background:#10b98122;color:var(--success)}
-.badge-idle{background:#64748b22;color:var(--sub)}
-.logs{max-height:180px;overflow-y:auto;font-family:monospace;font-size:10.5px;background:#090d16;padding:6px;border-radius:6px;border:1px solid var(--border)}
-.log-item{padding:2px 0;border-bottom:1px solid #1f293d44;display:flex;gap:4px}
-input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px;border-radius:6px;font-size:11px;width:100%}
-details{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}
-summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font-size:12px}
-.form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;padding:8px}
-.manage-ctrl{display:none}
-.manage-mode .manage-ctrl{display:table-cell}
-.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:#00000088;display:none;align-items:center;justify-content:center;z-index:99}
-.modal{background:#111827;border:1px solid var(--border);padding:14px;border-radius:10px;width:280px}
+:root{{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}}
+*{{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}}
+body{{background:var(--bg);color:var(--text);padding:8px;line-height:1.4}}
+.header-box{{display:flex;justify-content:space-between;align-items:center;padding:10px;background:var(--card);border-radius:10px;border:1px solid var(--border);margin-bottom:8px;flex-wrap:wrap;gap:6px}}
+.wallet-bar{{display:flex;gap:8px;align-items:center;background:#151e30;padding:4px 8px;border-radius:6px;border:1px solid var(--border)}}
+.tabs{{display:flex;gap:4px;margin:8px 0;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px}}
+.tab{{padding:6px 10px;background:#151e30;border:1px solid var(--border);border-radius:6px;color:var(--sub);cursor:pointer;font-weight:bold;white-space:nowrap;font-size:12px}}
+.tab.active{{background:var(--primary);color:#fff}}
+.tab-pane{{display:none}}
+.tab-pane.active{{display:block}}
+.card{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px}}
+.stats-row{{display:flex;gap:6px;margin-bottom:8px}}
+.stat-box{{flex:1;background:#151e30;border:1px solid var(--border);border-radius:8px;padding:6px 4px;text-align:center}}
+.stat-title{{font-size:10px;color:var(--sub);margin-bottom:2px;white-space:nowrap}}
+.stat-val{{font-size:14px;font-weight:bold}}
+.btn{{padding:4px 8px;border:none;border-radius:5px;font-weight:bold;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;justify-content:center;gap:3px}}
+.icon-btn{{padding:3px 6px;font-size:13px;border-radius:5px;border:none;cursor:pointer}}
+table{{width:100%;border-collapse:collapse;text-align:right}}
+th,td{{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}}
+th{{color:var(--sub)}}
+.badge{{padding:2px 4px;border-radius:4px;font-size:10px;font-weight:bold}}
+.badge-active{{background:#10b98122;color:var(--success)}}
+.badge-idle{{background:#64748b22;color:var(--sub)}}
+.logs{{max-height:180px;overflow-y:auto;font-family:monospace;font-size:10.5px;background:#090d16;padding:6px;border-radius:6px;border:1px solid var(--border)}}
+.log-item{{padding:2px 0;border-bottom:1px solid #1f293d44;display:flex;gap:4px}}
+input,select{{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px;border-radius:6px;font-size:11px;width:100%}}
+details{{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}}
+summary{{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font-size:12px}}
+.form-row{{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;padding:8px}}
+.manage-ctrl{{display:none}}
+.manage-mode .manage-ctrl{{display:table-cell}}
+.modal-overlay{{position:fixed;top:0;left:0;right:0;bottom:0;background:#00000088;display:none;align-items:center;justify-content:center;z-index:99}}
+.modal{{background:#111827;border:1px solid var(--border);padding:14px;border-radius:10px;width:280px}}
 </style>
 </head>
 <body>
@@ -583,16 +791,20 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
   </details>
 
   <div class="tabs">
-    <button class="tab active" onclick="showTab('t-b1', this)">🤖 Bot 1</button>
-    <button class="tab" onclick="showTab('t-b2a', this)">⚡ Bot 2A</button>
-    <button class="tab" onclick="showTab('t-b2b', this)">⚡ Bot 2B</button>
-    <button class="tab" onclick="showTab('t-b2c', this)">⚡ Bot 2C</button>
-    <button class="tab" onclick="showTab('t-b3', this)">🎯 Bot 3</button>
+    <button class="tab active" onclick="showTab('t-bot_1', this)">🤖 Bot 1</button>
+    <button class="tab" onclick="showTab('t-bot_2a', this)">⚡ Bot 2A</button>
+    <button class="tab" onclick="showTab('t-bot_2b', this)">⚡ Bot 2B</button>
+    <button class="tab" onclick="showTab('t-bot_2c', this)">⚡ Bot 2C</button>
+    <button class="tab" onclick="showTab('t-bot_3', this)">🎯 Bot 3</button>
     <button class="tab" onclick="showTab('t-w', this)">💰 المحفظة</button>
   </div>
 
-  <!-- مولد واجهات البوتات 1 و 2A و 2B و 2C و 3 -->
-  <div id="bot-panes-container"></div>
+  <!-- البوتات الثابتة في الـ HTML لمنع الصفحة البيضاء -->
+  {get_bot_template_html('BOT_1', '🤖 Bot 1 (EWO 5m)', '5m', False)}
+  {get_bot_template_html('BOT_2A', '⚡ Bot 2A (Scalp 15m)', '15m', False)}
+  {get_bot_template_html('BOT_2B', '⚡ Bot 2B (Swing 1h)', '60m', False)}
+  {get_bot_template_html('BOT_2C', '⚡ Bot 2C (Custom TF)', '5m', False)}
+  {get_bot_template_html('BOT_3', '🎯 Bot 3 (Manual Trigger)', '1m', True)}
 
   <!-- Wallet -->
   <div id="t-w" class="tab-pane">
@@ -665,97 +877,7 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
   </details>
 
 <script>
-const BOT_LIST = [
-  {key:'BOT_1', id:'t-b1', name:'🤖 Bot 1 (EWO 5m)', tf:'5m', isB3:false},
-  {key:'BOT_2A', id:'t-b2a', name:'⚡ Bot 2A (Scalp 15m)', tf:'15m', isB3:false},
-  {key:'BOT_2B', id:'t-b2b', name:'⚡ Bot 2B (Swing 1h)', tf:'60m', isB3:false},
-  {key:'BOT_2C', id:'t-b2c', name:'⚡ Bot 2C (Custom TF)', tf:'5m', isB3:false},
-  {key:'BOT_3', id:'t-b3', name:'🎯 Bot 3 (Manual Trigger)', tf:'1m', isB3:true}
-];
-
-// إنشاء التبويبات ديناميكياً
-function buildBotPanes(){
-  let h = '';
-  BOT_LIST.forEach((b, idx) => {
-    const pfx = b.key.toLowerCase();
-    const activeCls = idx === 0 ? 'active' : '';
-    h += `
-    <div id="${b.id}" class="tab-pane ${activeCls}">
-      <div class="card" style="display:flex;justify-content:space-between;align-items:center">
-        <span>${b.name}: <strong id="${pfx}-st" style="color:#f59e0b">PAUSED</strong></span>
-        <div style="display:flex;gap:3px">
-          <button class="icon-btn" style="background:var(--success);color:#fff" title="تشغيل" onclick="setSt('${b.key}','RUNNING')">▶️</button>
-          <button class="icon-btn" style="background:#f59e0b;color:#000" title="إيقاف مؤقت" onclick="setSt('${b.key}','PAUSED')">⏸️</button>
-          <button class="icon-btn" style="background:var(--danger);color:#fff" title="إيقاف تام" onclick="setSt('${b.key}','STOPPED')">⏹️</button>
-        </div>
-      </div>
-      
-      <!-- 3 بطاقات في سطر واحد على الآيفون -->
-      <div class="stats-row">
-        <div class="stat-box">
-          <div class="stat-title">أرباح اليوم</div>
-          <div class="stat-val" id="${pfx}-pnl">+0.00$</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-title">نسبة الفوز</div>
-          <div class="stat-val" id="${pfx}-winrate">0%</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-title">السيولة المفتوحة</div>
-          <div class="stat-val" id="${pfx}-cap-used">0$</div>
-        </div>
-      </div>
-
-      <details class="card">
-        <summary style="color:#a78bfa">⚙️ الإعدادات وسقف رأس المال (3 عملات)</summary>
-        <div class="form-row" style="padding-top:8px">
-          <div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="${pfx}-alloc" value="50"></div>
-          <div><label style="font-size:10px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="${pfx}-maxcon" value="1"></div>
-          <div><label style="font-size:10px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="${pfx}-size" value="10"></div>
-          <div><label style="font-size:10px;color:var(--sub)">هدف الربح (TP %)</label><input type="number" id="${pfx}-tp" value="2.5" step="0.1"></div>
-          <div><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="${pfx}-sl" value="1.2" step="0.1"></div>
-          ${!b.isB3 ? `
-          <div>
-            <label style="font-size:10px;color:var(--sub)">الفريم الزمني</label>
-            <select id="${pfx}-tf">
-              <option value="1m" ${b.tf==='1m'?'selected':''}>1m</option>
-              <option value="5m" ${b.tf==='5m'?'selected':''}>5m</option>
-              <option value="15m" ${b.tf==='15m'?'selected':''}>15m</option>
-              <option value="30m" ${b.tf==='30m'?'selected':''}>30m</option>
-              <option value="60m" ${b.tf==='60m'?'selected':''}>1h</option>
-            </select>
-          </div>` : `
-          <div>
-            <label style="font-size:10px;color:var(--sub)">Trailing Stop</label>
-            <select id="${pfx}-ts"><option value="1">مفعّل ✅</option><option value="0">معطّل ❌</option></select>
-          </div>`}
-          <div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg('${b.key}', '${pfx}')">💾 حفظ</button></div>
-        </div>
-      </details>
-
-      <details class="card" id="${pfx}-coins-card" open>
-        <summary style="display:flex;justify-content:space-between;align-items:center">
-          <span>📊 جدول العملات وأرباح اليوم</span>
-          <div style="display:flex;gap:3px" onclick="event.stopPropagation()">
-            <button class="btn manage-ctrl" style="background:#10b981;color:#fff;font-size:10px;padding:2px 4px" onclick="addCoinToBot('${b.key}')">➕ إضافة</button>
-            <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('${pfx}-coins-card')">⚙️</button>
-          </div>
-        </summary>
-        <div style="overflow-x:auto;padding-top:6px"><table id="${pfx}-coins-table"><thead><tr><th>العملة</th><th>السعر</th><th>ربح اليوم</th><th>الصفقات</th><th>دخول</th><th class="manage-ctrl">حذف</th></tr></thead><tbody></tbody></table></div>
-      </details>
-
-      <details class="card" id="${pfx}-orders-card" open>
-        <summary style="display:flex;justify-content:space-between;align-items:center">
-          <span>📂 الصفقات المفتوحة (Live PnL)</span>
-          <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('${pfx}-orders-card'); event.stopPropagation();">⚙️</button>
-        </summary>
-        <div style="overflow-x:auto;padding-top:6px"><table id="${pfx}-orders"><thead><tr><th>العملة</th><th>الدخول</th><th>الكمية</th><th>Live PnL</th><th>الوقت</th><th class="manage-ctrl">إجراءات</th></tr></thead><tbody></tbody></table></div>
-      </details>
-    </div>`;
-  });
-  document.getElementById('bot-panes-container').innerHTML = h;
-}
-buildBotPanes();
+const BOT_KEYS_JS = ['BOT_1', 'BOT_2A', 'BOT_2B', 'BOT_2C', 'BOT_3'];
 
 let rawLogs = [];
 let logsText = "";
@@ -765,204 +887,216 @@ let keysLoaded = false;
 let currentPublicIP = "";
 let initialConfigsPopulated = false;
 
-function showTab(id, btn){
+// تفعيل التبويب الأول فورياً
+document.getElementById('t-bot_1').classList.add('active');
+
+function showTab(id, btn){{
   document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  btn.classList.add('active');
-}
-function setLogFilter(cat, btn){
+  const target = document.getElementById(id);
+  if(target) target.classList.add('active');
+  if(btn) btn.classList.add('active');
+}}
+
+function setLogFilter(cat, btn){{
   currentLogFilter = cat;
   renderLogs();
-}
-function copyLogs(){
+}}
+
+function copyLogs(){{
   navigator.clipboard.writeText(logsText).then(()=>alert("✅ تم نسخ السجلات!"));
-}
-function copyServerIP(){
-  if(currentPublicIP && currentPublicIP !== "جاري الجلب..."){
+}}
+
+function copyServerIP(){{
+  if(currentPublicIP && currentPublicIP !== "جاري الجلب..."){{
     navigator.clipboard.writeText(currentPublicIP).then(()=>alert("IP: " + currentPublicIP));
-  }
-}
-function toggleManage(cardId){
+  }}
+}}
+
+function toggleManage(cardId){{
   const el = document.getElementById(cardId);
   if(el) el.classList.toggle('manage-mode');
-}
-function triggerUpdate(){
+}}
+
+function triggerUpdate(){{
   update();
   alert("🔄 جاري التحديث من المنصة...");
-}
-async function setSt(b,s){
-  await fetch('/api/control',{method:'POST',body:JSON.stringify({bot_name:b,status:s})});
+}}
+
+async function setSt(b,s){{
+  await fetch('/api/control',{{method:'POST',body:JSON.stringify({{bot_name:b,status:s}})}});
   update();
-}
-async function saveKeys(){
+}}
+
+async function saveKeys(){{
   let k = document.getElementById('m-key').value.replace(/\\s+/g, '');
   let s = document.getElementById('m-sec').value.replace(/\\s+/g, '');
-  if(!k || !s){ alert("يرجى إدخال المفتاح والسر"); return; }
-  await fetch('/api/save_keys',{method:'POST',body:JSON.stringify({api_key:k, api_secret:s})});
+  if(!k || !s){{ alert("يرجى إدخال المفتاح والسر"); return; }}
+  await fetch('/api/save_keys',{{method:'POST',body:JSON.stringify({{api_key:k, api_secret:s}})}});
   alert('✅ تم حفظ مفاتيح MEXC!');
   update();
-}
-async function changePass(){
+}}
+
+async function changePass(){{
   const p = document.getElementById('new-pass').value;
-  if(!p){ alert("أدخل كلمة المرور"); return; }
-  const res = await fetch('/api/change_password', {method:'POST', body:JSON.stringify({new_password:p})});
-  if(res.ok){ alert("✅ تم التغيير!"); document.getElementById('new-pass').value = ''; }
-}
+  if(!p){{ alert("أدخل كلمة المرور"); return; }}
+  const res = await fetch('/api/change_password', {{method:'POST', body:JSON.stringify({{new_password:p}})}});
+  if(res.ok){{ alert("✅ تم التغيير!"); document.getElementById('new-pass').value = ''; }}
+}}
 
-async function addCoinToBot(botName){
-  const coin = prompt(`أدخل رمز العملة لـ ${botName} (مثال: SOL أو BTC):`);
-  if(coin && coin.trim()){
-    const r = await fetch('/api/add_symbol', {method: 'POST', body: JSON.stringify({bot_name: botName, symbol: coin.trim().toUpperCase()})});
+async function addCoinToBot(botName){{
+  const coin = prompt(`أدخل رمز العملة لـ ${{botName}} (مثال: SOL أو BTC):`);
+  if(coin && coin.trim()){{
+    const r = await fetch('/api/add_symbol', {{method: 'POST', body: JSON.stringify({{bot_name: botName, symbol: coin.trim().toUpperCase()}})}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
+  }}
+}}
 
-async function removeCoinFromBot(botName, sym){
-  if(confirm(`حذف (${sym}) من ${botName}؟`)){
-    const r = await fetch('/api/remove_symbol', {method: 'POST', body: JSON.stringify({bot_name: botName, symbol: sym})});
+async function removeCoinFromBot(botName, sym){{
+  if(confirm(`حذف (${{sym}}) من ${{botName}}؟`)){{
+    const r = await fetch('/api/remove_symbol', {{method: 'POST', body: JSON.stringify({{bot_name: botName, symbol: sym}})}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
+  }}
+}}
 
-async function saveBotCfg(botName, prefix){
-  const payload = {
+async function saveBotCfg(botName, prefix){{
+  const payload = {{
     bot_name: botName,
     max_allocation_usdt: parseFloat(document.getElementById(prefix+'-alloc').value)||50,
     max_concurrent_per_coin: parseInt(document.getElementById(prefix+'-maxcon').value)||1,
     trade_size_usdt: parseFloat(document.getElementById(prefix+'-size').value)||10,
     tp_pct: (parseFloat(document.getElementById(prefix+'-tp').value)||2.5) / 100.0,
     sl_pct: (parseFloat(document.getElementById(prefix+'-sl').value)||1.2) / 100.0
-  };
+  }};
   const tfEl = document.getElementById(prefix+'-tf');
   if(tfEl) payload.timeframe = tfEl.value;
   const tsEl = document.getElementById(prefix+'-ts');
   if(tsEl) payload.trailing_stop = parseInt(tsEl.value);
 
-  await fetch('/api/save_bot_config', {method:'POST', body:JSON.stringify(payload)});
-  alert(`✅ تم حفظ إعدادات ${botName}!`);
+  await fetch('/api/save_bot_config', {{method:'POST', body:JSON.stringify(payload)}});
+  alert(`✅ تم حفظ إعدادات ${{botName}}!`);
   update();
-}
+}}
 
-async function triggerBuy(botName, sym){
-  if(confirm(`إطلاق شراء لـ ${sym} عبر ${botName}؟`)){
-    const r = await fetch('/api/manual_buy', {method:'POST', body:JSON.stringify({bot_name:botName, symbol:sym})});
+async function triggerBuy(botName, sym){{
+  if(confirm(`إطلاق شراء لـ ${{sym}} عبر ${{botName}}؟`)){{
+    const r = await fetch('/api/manual_buy', {{method:'POST', body:JSON.stringify({{bot_name:botName, symbol:sym}})}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
+  }}
+}}
 
-async function closeSinglePos(botName, sym, posId){
-  if(confirm(`تسييل ${sym} فوري بسعر السوق؟`)){
-    const r = await fetch('/api/close_position', {method:'POST', body:JSON.stringify({bot_name:botName, symbol:sym, pos_id:posId})});
+async function closeSinglePos(botName, sym, posId){{
+  if(confirm(`تسييل ${{sym}} فوري بسعر السوق؟`)){{
+    const r = await fetch('/api/close_position', {{method:'POST', body:JSON.stringify({{bot_name:botName, symbol:sym, pos_id:posId}})}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
+  }}
+}}
 
-async function unlinkPos(botName, sym, posId){
-  if(confirm(`إلغاء وإزالة الصفقة من البوت دون بيعها في المنصة؟`)){
-    const r = await fetch('/api/unlink_position', {method:'POST', body:JSON.stringify({bot_name:botName, symbol:sym, pos_id:posId})});
+async function unlinkPos(botName, sym, posId){{
+  if(confirm(`إلغاء وإزالة الصفقة من البوت دون بيعها في المنصة؟`)){{
+    const r = await fetch('/api/unlink_position', {{method:'POST', body:JSON.stringify({{bot_name:botName, symbol:sym, pos_id:posId}})}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
+  }}
+}}
 
-function openEditModal(posId, entry, qty, tp, sl){
+function openEditModal(posId, entry, qty, tp, sl){{
   document.getElementById('edit-pos-id').value = posId;
   document.getElementById('edit-entry').value = entry;
   document.getElementById('edit-qty').value = qty;
   document.getElementById('edit-tp').value = ((tp||0.025)*100).toFixed(2);
   document.getElementById('edit-sl').value = ((sl||0.012)*100).toFixed(2);
   document.getElementById('edit-modal').style.display = 'flex';
-}
-function closeEditModal(){
+}}
+function closeEditModal(){{
   document.getElementById('edit-modal').style.display = 'none';
-}
-async function saveEditedPos(){
+}}
+async function saveEditedPos(){{
   const posId = document.getElementById('edit-pos-id').value;
-  const payload = {
+  const payload = {{
     pos_id: posId,
     entry_price: parseFloat(document.getElementById('edit-entry').value),
     qty: parseFloat(document.getElementById('edit-qty').value),
     tp_pct: (parseFloat(document.getElementById('edit-tp').value)||2.5)/100.0,
     sl_pct: (parseFloat(document.getElementById('edit-sl').value)||1.2)/100.0
-  };
-  await fetch('/api/edit_position', {method:'POST', body:JSON.stringify(payload)});
+  }};
+  await fetch('/api/edit_position', {{method:'POST', body:JSON.stringify(payload)}});
   closeEditModal();
   alert("✅ تم التعديل وحفظ البيانات في SQLite!");
   update();
-}
+}}
 
-async function cancelLimitOrder(sym, orderId){
-  if(confirm(`إلغاء الأمر ${orderId} لـ ${sym} في MEXC؟`)){
-    const r = await fetch('/api/cancel_order', {method:'POST', body:JSON.stringify({symbol:sym, order_id:orderId})});
+async function cancelLimitOrder(sym, orderId){{
+  if(confirm(`إلغاء الأمر ${{orderId}} لـ ${{sym}} في MEXC؟`)){{
+    const r = await fetch('/api/cancel_order', {{method:'POST', body:JSON.stringify({{symbol:sym, order_id:orderId}})}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
+  }}
+}}
 
-async function convertDustDirect(){
-  if(confirm("تحويل الأرصدة الصغيرة لـ MX؟")){
-    const r = await fetch('/api/convert_dust_direct', {method:'POST'});
+async function convertDustDirect(){{
+  if(confirm("تحويل الأرصدة الصغيرة لـ MX؟")){{
+    const r = await fetch('/api/convert_dust_direct', {{method:'POST'}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
+  }}
+}}
 
-async function panicMarket(asset){
-  if(confirm(`تسييل ${asset} بسعر السوق؟`)){
-    const r = await fetch('/api/panic',{method:'POST',body:JSON.stringify({asset:asset, order_type:'MARKET'})});
+async function panicMarket(asset){{
+  if(confirm(`تسييل ${{asset}} بسعر السوق؟`)){{
+    const r = await fetch('/api/panic',{{method:'POST',body:JSON.stringify({{asset:asset, order_type:'MARKET'}})}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
-async function panicLimit(asset, curPrice){
-  const priceStr = prompt(`سعر أمر LIMIT لـ ${asset}:`, curPrice);
-  if(priceStr){
+  }}
+}}
+async function panicLimit(asset, curPrice){{
+  const priceStr = prompt(`سعر أمر LIMIT لـ ${{asset}}:`, curPrice);
+  if(priceStr){{
     const limitPrice = parseFloat(priceStr);
-    if(limitPrice > 0){
-      const r = await fetch('/api/panic', {method:'POST', body:JSON.stringify({asset:asset, order_type:'LIMIT', price:limitPrice})});
+    if(limitPrice > 0){{
+      const r = await fetch('/api/panic', {{method:'POST', body:JSON.stringify({{asset:asset, order_type:'LIMIT', price:limitPrice}})}});
       const d = await r.json();
       alert(d.msg);
       update();
-    }
-  }
-}
-async function panicSellAll(){
-  if(confirm("⚠️ تسييل كل العملات لـ USDT؟")){
-    const r = await fetch('/api/panic_all', {method:'POST'});
+    }}
+  }}
+}}
+async function panicSellAll(){{
+  if(confirm("⚠️ تسييل كل العملات لـ USDT؟")){{
+    const r = await fetch('/api/panic_all', {{method:'POST'}});
     const d = await r.json();
     alert(d.msg);
     update();
-  }
-}
+  }}
+}}
 
-function updateUptime(){
+function updateUptime(){{
   const diff = Math.floor((Date.now() - startTs) / 1000);
   const hrs = Math.floor(diff / 3600);
   const mins = Math.floor((diff % 3600) / 60);
   const secs = diff % 60;
-  document.getElementById('uptime').innerText = `${hrs}س ${mins}د ${secs}ث`;
-}
+  document.getElementById('uptime').innerText = `${{hrs}}س ${{mins}}د ${{secs}}ث`;
+}}
 setInterval(updateUptime, 1000);
 
-function renderLogs(){
+function renderLogs(){{
   const searchQ = (document.getElementById('log-search').value || '').toLowerCase();
   let lHtml = '';
   logsText = '';
 
-  rawLogs.forEach(l => {
+  rawLogs.forEach(l => {{
     const cat = l.cat || 'system';
     const msgLower = (l.msg || '').toLowerCase();
     if(currentLogFilter !== 'all' && cat !== currentLogFilter) return;
@@ -974,43 +1108,42 @@ function renderLogs(){
     else if(l.type === 'warning') typeColor = '#f59e0b';
     else if(l.type === 'primary') typeColor = '#60a5fa';
 
-    lHtml += `<div class="log-item"><span style="color:var(--sub)">[${l.time}]</span> <span style="color:${typeColor}">${l.msg}</span></div>`;
-    logsText += `[${l.time}] ${l.msg}\\n`;
-  });
+    lHtml += `<div class="log-item"><span style="color:var(--sub)">[${{l.time}}]</span> <span style="color:${{typeColor}}">${{l.msg}}</span></div>`;
+    logsText += `[${{l.time}}] ${{l.msg}}\\n`;
+  }});
   document.getElementById('logs').innerHTML = lHtml || '<div style="color:var(--sub);text-align:center">لا توجد أحداث</div>';
-}
+}}
 
-async function update(){
-  try{
+async function update(){{
+  try{{
     const res = await fetch('/api/data');
-    if(res.status===401) { location.href='/login'; return; }
+    if(res.status===401) {{ location.href='/login'; return; }}
     const d = await res.json();
     
     if(d.start_timestamp) startTs = d.start_timestamp * 1000;
-    if(d.server_public_ip){
+    if(d.server_public_ip){{
       currentPublicIP = d.server_public_ip;
       document.getElementById('server-ip-val').innerText = d.server_public_ip;
-    }
+    }}
 
     document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + ' $';
     document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0.0).toFixed(2) + ' $';
     document.getElementById('api-stat').innerHTML = d.api_connected ? '<span style="color:var(--success)">🟢 متصل</span>' : '<span style="color:var(--danger)">🔴 مفصول</span>';
 
-    if(d.has_saved_keys){
-      document.getElementById('keys-status-badge').innerHTML = `<span style="color:var(--success);font-weight:bold">(${d.masked_key})</span>`;
-      if(!keysLoaded){
-        document.getElementById('m-key').placeholder = `محفوظ (${d.masked_key})`;
+    if(d.has_saved_keys){{
+      document.getElementById('keys-status-badge').innerHTML = `<span style="color:var(--success);font-weight:bold">(${{d.masked_key}})</span>`;
+      if(!keysLoaded){{
+        document.getElementById('m-key').placeholder = `محفوظ (${{d.masked_key}})`;
         document.getElementById('m-sec').placeholder = "محفوظ (*********)";
         keysLoaded = true;
-      }
-    }
+      }}
+    }}
 
-    // تعبئة الإعدادات
-    if(!initialConfigsPopulated && d.bots){
-      BOT_LIST.forEach(b => {
-        const pfx = b.key.toLowerCase();
-        const bObj = d.bots[b.key];
-        if(bObj){
+    if(!initialConfigsPopulated && d.bots){{
+      BOT_KEYS_JS.forEach(bKey => {{
+        const pfx = bKey.toLowerCase();
+        const bObj = d.bots[bKey];
+        if(bObj){{
           if(document.getElementById(pfx+'-alloc') && bObj.max_allocation) document.getElementById(pfx+'-alloc').value = bObj.max_allocation;
           if(document.getElementById(pfx+'-size') && bObj.trade_size) document.getElementById(pfx+'-size').value = bObj.trade_size;
           if(document.getElementById(pfx+'-maxcon') && bObj.max_concurrent) document.getElementById(pfx+'-maxcon').value = bObj.max_concurrent;
@@ -1018,142 +1151,143 @@ async function update(){
           if(document.getElementById(pfx+'-sl') && bObj.sl_pct !== undefined) document.getElementById(pfx+'-sl').value = bObj.sl_pct;
           if(document.getElementById(pfx+'-tf') && bObj.timeframe) document.getElementById(pfx+'-tf').value = bObj.timeframe;
           if(document.getElementById(pfx+'-ts') && bObj.trailing_stop !== undefined) document.getElementById(pfx+'-ts').value = bObj.trailing_stop;
-        }
-      });
+        }}
+      }});
       initialConfigsPopulated = true;
-    }
+    }}
 
-    // تحديث جداول البوتات
-    BOT_LIST.forEach(b => {
-      const pfx = b.key.toLowerCase();
-      const bObj = d.bots[b.key];
-      if(!bObj) return;
+    BOT_KEYS_JS.forEach(bKey => {{
+      try{{
+        const pfx = bKey.toLowerCase();
+        const bObj = d.bots ? d.bots[bKey] : null;
+        if(!bObj) return;
 
-      const stEl = document.getElementById(pfx+'-st');
-      if(stEl){
-        stEl.innerText = bObj.status || 'PAUSED';
-        stEl.style.color = bObj.status === 'RUNNING' ? '#10b981' : (bObj.status === 'PAUSED' ? '#f59e0b' : '#ef4444');
-      }
+        const stEl = document.getElementById(pfx+'-st');
+        if(stEl){{
+          stEl.innerText = bObj.status || 'PAUSED';
+          stEl.style.color = bObj.status === 'RUNNING' ? '#10b981' : (bObj.status === 'PAUSED' ? '#f59e0b' : '#ef4444');
+        }}
 
-      const pnl = bObj.daily_pnl || 0.0;
-      const pnlEl = document.getElementById(pfx+'-pnl');
-      if(pnlEl){
-        pnlEl.innerText = (pnl >= 0 ? '+' : '') + pnl.toFixed(3) + '$';
-        pnlEl.style.color = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
-      }
+        const pnl = bObj.daily_pnl || 0.0;
+        const pnlEl = document.getElementById(pfx+'-pnl');
+        if(pnlEl){{
+          pnlEl.innerText = (pnl >= 0 ? '+' : '') + pnl.toFixed(3) + '$';
+          pnlEl.style.color = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+        }}
 
-      const totalT = bObj.trades_count || 0;
-      const winT = bObj.winning_count || 0;
-      const wr = totalT > 0 ? ((winT / totalT) * 100).toFixed(0) : '0';
-      const wrEl = document.getElementById(pfx+'-winrate');
-      if(wrEl) wrEl.innerText = `${wr}% (${totalT})`;
+        const totalT = bObj.trades_count || 0;
+        const winT = bObj.winning_count || 0;
+        const wr = totalT > 0 ? ((winT / totalT) * 100).toFixed(0) : '0';
+        const wrEl = document.getElementById(pfx+'-winrate');
+        if(wrEl) wrEl.innerText = `${{wr}}% (${{totalT}})`;
 
-      let totalOpen = 0;
-      let coinsTableHtml = '';
-      (bObj.symbols || []).forEach(sym => {
-        const count = (bObj.active_positions && bObj.active_positions[sym]) ? bObj.active_positions[sym].length : 0;
-        totalOpen += count;
-        const coinPnl = (bObj.daily_pnl_coins && bObj.daily_pnl_coins[sym]) ? bObj.daily_pnl_coins[sym] : 0.0;
-        const price = (d.market_prices && d.market_prices[sym]) ? d.market_prices[sym].bid : 0.0;
+        let totalOpen = 0;
+        let coinsTableHtml = '';
+        (bObj.symbols || []).forEach(sym => {{
+          const count = (bObj.active_positions && bObj.active_positions[sym]) ? bObj.active_positions[sym].length : 0;
+          totalOpen += count;
+          const coinPnl = (bObj.daily_pnl_coins && bObj.daily_pnl_coins[sym]) ? bObj.daily_pnl_coins[sym] : 0.0;
+          const price = (d.market_prices && d.market_prices[sym]) ? d.market_prices[sym].bid : 0.0;
 
-        coinsTableHtml += `<tr>
-          <td><strong>${sym}</strong></td>
-          <td>${price ? price.toFixed(4)+'$' : '-'}</td>
-          <td style="color:${coinPnl>=0?'var(--success)':'var(--danger)'};font-weight:bold">${(coinPnl>=0?'+':'')+coinPnl.toFixed(3)}$</td>
-          <td><span class="badge ${count>0?'badge-active':'badge-idle'}">${count}/${bObj.max_concurrent||1}</span></td>
-          <td><button class="icon-btn" style="background:var(--primary);color:#fff" title="شراء" onclick="triggerBuy('${b.key}','${sym}')">⚡</button></td>
-          <td class="manage-ctrl"><button class="icon-btn" style="background:#334155;color:#f87171" title="حذف" onclick="removeCoinFromBot('${b.key}','${sym}')">🗑️</button></td>
-        </tr>`;
-      });
+          coinsTableHtml += `<tr>
+            <td><strong>${{sym}}</strong></td>
+            <td>${{price ? price.toFixed(4)+'$' : '-'}}</td>
+            <td style="color:${{coinPnl>=0?'var(--success)':'var(--danger)'}};font-weight:bold">${{(coinPnl>=0?'+':'')+coinPnl.toFixed(3)}}$</td>
+            <td><span class="badge ${{count>0?'badge-active':'badge-idle'}}">${{count}}/${{bObj.max_concurrent||1}}</span></td>
+            <td><button class="icon-btn" style="background:var(--primary);color:#fff" title="شراء" onclick="triggerBuy('${{bKey}}','${{sym}}')">⚡</button></td>
+            <td class="manage-ctrl"><button class="icon-btn" style="background:#334155;color:#f87171" title="حذف" onclick="removeCoinFromBot('${{bKey}}','${{sym}}')">🗑️</button></td>
+          </tr>`;
+        }});
 
-      const coinsTable = document.getElementById(pfx+'-coins-table');
-      if(coinsTable){
-        coinsTable.querySelector('tbody').innerHTML = coinsTableHtml || '<tr><td colspan="6" style="text-align:center">لا توجد عملات</td></tr>';
-      }
-      
-      const usedUsd = totalOpen * (bObj.trade_size || 10);
-      const capEl = document.getElementById(pfx+'-cap-used');
-      if(capEl) capEl.innerText = `${usedUsd.toFixed(0)}/${bObj.max_allocation||50}$`;
+        const coinsTable = document.getElementById(pfx+'-coins-table');
+        if(coinsTable){{
+          coinsTable.querySelector('tbody').innerHTML = coinsTableHtml || '<tr><td colspan="6" style="text-align:center">لا توجد عملات</td></tr>';
+        }}
+        
+        const usedUsd = totalOpen * (bObj.trade_size || 10);
+        const capEl = document.getElementById(pfx+'-cap-used');
+        if(capEl) capEl.innerText = `${{usedUsd.toFixed(0)}}/${{bObj.max_allocation||50}}$`;
 
-      let posHtml = '';
-      if(bObj.active_positions){
-        for(let s in bObj.active_positions){
-          const curBid = (d.market_prices && d.market_prices[s]) ? d.market_prices[s].bid : 0.0;
-          (bObj.active_positions[s] || []).forEach(p=>{
-            const livePnlVal = curBid ? (curBid - p.entry_price) * p.qty : 0.0;
-            const livePnlPct = (curBid && p.entry_price > 0) ? ((curBid - p.entry_price) / p.entry_price) * 100.0 : 0.0;
-            const pnlColor = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
+        let posHtml = '';
+        if(bObj.active_positions){{
+          for(let s in bObj.active_positions){{
+            const curBid = (d.market_prices && d.market_prices[s]) ? d.market_prices[s].bid : 0.0;
+            (bObj.active_positions[s] || []).forEach(p=>{{
+              const livePnlVal = curBid ? (curBid - p.entry_price) * p.qty : 0.0;
+              const livePnlPct = (curBid && p.entry_price > 0) ? ((curBid - p.entry_price) / p.entry_price) * 100.0 : 0.0;
+              const pnlColor = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
 
-            posHtml += `<tr>
-              <td><strong>${s}</strong></td>
-              <td>${p.entry_price}$</td>
-              <td>${p.qty}</td>
-              <td style="color:${pnlColor};font-weight:bold">${livePnlVal>=0?'+':''}${livePnlVal.toFixed(3)}$ (${livePnlPct.toFixed(2)}%)</td>
-              <td>${p.time}</td>
-              <td class="manage-ctrl">
-                <div style="display:flex;gap:3px">
-                  <button class="icon-btn" style="background:var(--danger);color:#fff" title="تسييل" onclick="closeSinglePos('${b.key}','${s}', '${p.id}')">🔥</button>
-                  <button class="icon-btn" style="background:#3b82f6;color:#fff" title="تعديل" onclick="openEditModal('${p.id}', ${p.entry_price}, ${p.qty}, ${p.tp_pct||0.025}, ${p.sl_pct||0.012})">✏️</button>
-                  <button class="icon-btn" style="background:#475569;color:#fca5a5" title="فك ربط" onclick="unlinkPos('${b.key}','${s}', '${p.id}')">🚫</button>
-                </div>
-              </td>
-            </tr>`;
-          });
-        }
-      }
-      const ordersTable = document.getElementById(pfx+'-orders');
-      if(ordersTable){
-        ordersTable.querySelector('tbody').innerHTML = posHtml || `<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>`;
-      }
-    });
+              posHtml += `<tr>
+                <td><strong>${{s}}</strong></td>
+                <td>${{p.entry_price}}$</td>
+                <td>${{p.qty}}</td>
+                <td style="color:${{pnlColor}};font-weight:bold">${{livePnlVal>=0?'+':''}}${{livePnlVal.toFixed(3)}}$ (${{livePnlPct.toFixed(2)}}%)</td>
+                <td>${{p.time}}</td>
+                <td class="manage-ctrl">
+                  <div style="display:flex;gap:3px">
+                    <button class="icon-btn" style="background:var(--danger);color:#fff" title="تسييل" onclick="closeSinglePos('${{bKey}}','${{s}}', '${{p.id}}')">🔥</button>
+                    <button class="icon-btn" style="background:#3b82f6;color:#fff" title="تعديل" onclick="openEditModal('${{p.id}}', ${{p.entry_price}}, ${{p.qty}}, ${{p.tp_pct||0.025}}, ${{p.sl_pct||0.012}})">✏️</button>
+                    <button class="icon-btn" style="background:#475569;color:#fca5a5" title="فك ربط" onclick="unlinkPos('${{bKey}}','${{s}}', '${{p.id}}')">🚫</button>
+                  </div>
+                </td>
+              </tr>`;
+            }});
+          }}
+        }}
+        const ordersTable = document.getElementById(pfx+'-orders');
+        if(ordersTable){{
+          ordersTable.querySelector('tbody').innerHTML = posHtml || `<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>`;
+        }}
+      }}catch(err){{}}
+    }});
 
     let wHtml = '';
-    (d.wallet_assets||[]).forEach(a=>{
+    (d.wallet_assets||[]).forEach(a=>{{
       const canSell = a.asset !== 'USDT' && a.free > 0;
       const priceStr = a.asset === 'USDT' ? '1.00 $' : (a.usd_price > 0 ? a.usd_price.toFixed(4) + ' $' : '-');
       const valStr = a.usd_value > 0 ? a.usd_value.toFixed(2) + ' $' : '0.00 $';
       
       wHtml += `<tr>
-        <td><strong>${a.asset}</strong></td>
-        <td>${a.free}</td>
-        <td>${a.locked}</td>
-        <td>${priceStr}</td>
-        <td style="color:#38bdf8;font-weight:bold">${valStr}</td>
+        <td><strong>${{a.asset}}</strong></td>
+        <td>${{a.free}}</td>
+        <td>${{a.locked}}</td>
+        <td>${{priceStr}}</td>
+        <td style="color:#38bdf8;font-weight:bold">${{valStr}}</td>
         <td class="manage-ctrl">
-          ${canSell ? `
+          ${{canSell ? `
             <div style="display:flex;gap:3px">
-              <button class="icon-btn" style="background:var(--danger);color:#fff" title="تسييل سوق" onclick="panicMarket('${a.asset}')">🔥</button>
-              <button class="icon-btn" style="background:#f59e0b;color:#000" title="تسييل ليميت" onclick="panicLimit('${a.asset}', ${a.usd_price})">📝</button>
+              <button class="icon-btn" style="background:var(--danger);color:#fff" title="تسييل سوق" onclick="panicMarket('${{a.asset}}')">🔥</button>
+              <button class="icon-btn" style="background:#f59e0b;color:#000" title="تسييل ليميت" onclick="panicLimit('${{a.asset}}', ${{a.usd_price}})">📝</button>
             </div>
-          ` : '-'}
+          ` : '-'}}
         </td>
       </tr>`;
-    });
+    }});
     const wTable = document.getElementById('w-table');
-    if(wTable){
+    if(wTable){{
       wTable.querySelector('tbody').innerHTML = wHtml || '<tr><td colspan="6" style="text-align:center">لا توجد أرصدة</td></tr>';
-    }
+    }}
 
     let ordHtml = '';
-    (d.open_limit_orders || []).forEach(o => {
+    (d.open_limit_orders || []).forEach(o => {{
       ordHtml += `<tr>
-        <td><strong>${o.symbol}</strong></td>
-        <td style="color:${o.side==='BUY'?'var(--success)':'var(--danger)'};font-weight:bold">${o.side}</td>
-        <td>${parseFloat(o.price)}$</td>
-        <td>${parseFloat(o.origQty)}</td>
-        <td>${new Date(o.time).toLocaleTimeString()}</td>
-        <td class="manage-ctrl"><button class="icon-btn" style="background:#dc2626;color:#fff" title="إلغاء" onclick="cancelLimitOrder('${o.symbol}', '${o.orderId}')">❌</button></td>
+        <td><strong>${{o.symbol}}</strong></td>
+        <td style="color:${{o.side==='BUY'?'var(--success)':'var(--danger)'}};font-weight:bold">${{o.side}}</td>
+        <td>${{parseFloat(o.price)}}$</td>
+        <td>${{parseFloat(o.origQty)}}</td>
+        <td>${{new Date(o.time).toLocaleTimeString()}}</td>
+        <td class="manage-ctrl"><button class="icon-btn" style="background:#dc2626;color:#fff" title="إلغاء" onclick="cancelLimitOrder('${{o.symbol}}', '${{o.orderId}}')">❌</button></td>
       </tr>`;
-    });
+    }});
     const limitTable = document.getElementById('limit-orders-table');
-    if(limitTable){
+    if(limitTable){{
       limitTable.querySelector('tbody').innerHTML = ordHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أوامر معلقة</td></tr>';
-    }
+    }}
 
     rawLogs = d.recent_logs || [];
     renderLogs();
-  }catch(e){}
-}
+  }}catch(e){{}}
+}}
 setInterval(update, 2000);
 update();
 </script>
@@ -1181,14 +1315,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps(shared_state, ensure_ascii=False).encode('utf-8'))
         elif self.path == '/analytics':
-            try:
-                with open("analytics.html", "r", encoding="utf-8") as f:
-                    html_content = f.read()
-                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
-                self.wfile.write(html_content.encode('utf-8'))
-            except Exception:
-                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
-                self.wfile.write(b"<h3>Analytics page (analytics.html) not found.</h3><a href='/'>Back</a>")
+            self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+            self.wfile.write(ANALYTICS_HTML.encode('utf-8'))
         elif self.path == '/api/logout':
             self.send_response(200); self.send_header('Set-Cookie', 'session_id=; Path=/; Max-Age=0'); self.end_headers()
         else:
