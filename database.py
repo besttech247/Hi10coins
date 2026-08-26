@@ -23,13 +23,22 @@ def init_db():
     )
     """)
 
+    # إعدادات عامة للتحكم في الملاحقة والعمولات
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS global_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chase_timeout INTEGER DEFAULT 12,
+        chase_interval REAL DEFAULT 2.0
+    )
+    """)
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS bots_config (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         bot_name TEXT UNIQUE NOT NULL,
         display_name TEXT NOT NULL,
         symbols TEXT DEFAULT 'SOLUSDT, BTCUSDT, ETHUSDT',
-        order_exec_type TEXT DEFAULT 'MARKET',
+        order_exec_type TEXT DEFAULT 'CHASE_LIMIT',
         max_allocation_usdt REAL DEFAULT 50.0,
         max_concurrent_per_coin INTEGER DEFAULT 1,
         trade_size_usdt REAL DEFAULT 10.0,
@@ -57,6 +66,23 @@ def init_db():
     """)
 
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS sniper_trades (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        entry_price REAL NOT NULL,
+        highest_price REAL NOT NULL,
+        qty REAL NOT NULL,
+        orig_qty REAL NOT NULL,
+        tp1_pct REAL DEFAULT 0.02,
+        tp2_pct REAL DEFAULT 0.04,
+        sl_pct REAL DEFAULT 0.015,
+        trailing_cb REAL DEFAULT 0.008,
+        tp1_hit INTEGER DEFAULT 0,
+        time_str TEXT NOT NULL
+    )
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS closed_trades (
         id TEXT PRIMARY KEY,
         bot_name TEXT NOT NULL,
@@ -73,25 +99,10 @@ def init_db():
     )
     """)
 
-    # جدول صفقات القناص المستقلة
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS sniper_trades (
-        id TEXT PRIMARY KEY,
-        symbol TEXT NOT NULL,
-        entry_price REAL NOT NULL,
-        highest_price REAL NOT NULL,
-        qty REAL NOT NULL,
-        tp_pct REAL DEFAULT 0.03,
-        sl_pct REAL DEFAULT 0.015,
-        trailing_cb REAL DEFAULT 0.008,
-        is_break_even INTEGER DEFAULT 0,
-        time_str TEXT NOT NULL
-    )
-    """)
-
     default_pass = hashlib.sha256("admin123".encode('utf-8')).hexdigest()
     cursor.execute("INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'admin', ?)", (default_pass,))
     cursor.execute("INSERT OR IGNORE INTO exchange_keys (id, api_key, api_secret) VALUES (1, '', '')")
+    cursor.execute("INSERT OR IGNORE INTO global_settings (id, chase_timeout, chase_interval) VALUES (1, 12, 2.0)")
 
     default_3_symbols = "SOLUSDT, BTCUSDT, ETHUSDT"
     bots = [
@@ -99,7 +110,7 @@ def init_db():
         (2, 'BOT_2A', '⚡ Bot 2A (Scalp 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.012, 0, 'PAUSED'),
         (3, 'BOT_2B', '⚡ Bot 2B (Swing 1h)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '60m', 0.035, 0.015, 0, 'PAUSED'),
         (4, 'BOT_2C', '⚡ Bot 2C (Custom TF)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.020, 0.010, 0, 'PAUSED'),
-        (5, 'BOT_3', '🎯 Bot 3 (Manual Trigger)', 'BTCUSDT, ETHUSDT', 'MARKET', 50.0, 1, 10.0, '1m', 0.025, 0.012, 1, 'PAUSED')
+        (5, 'BOT_3', '🎯 Bot 3 (Manual Trigger)', 'BTCUSDT, ETHUSDT', 'CHASE_LIMIT', 50.0, 1, 10.0, '1m', 0.025, 0.012, 1, 'PAUSED')
     ]
 
     for b in bots:
@@ -124,6 +135,22 @@ def save_keys(api_key, api_secret):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("UPDATE exchange_keys SET api_key = ?, api_secret = ? WHERE id = 1", (api_key.strip(), api_secret.strip()))
+    conn.commit()
+    conn.close()
+
+def get_global_settings():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT chase_timeout, chase_interval FROM global_settings WHERE id = 1")
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else {"chase_timeout": 12, "chase_interval": 2.0}
+
+def save_global_settings(timeout, interval):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE global_settings SET chase_timeout = ?, chase_interval = ? WHERE id = 1", (int(timeout), float(interval)))
     conn.commit()
     conn.close()
 
@@ -199,14 +226,13 @@ def insert_sniper_trade(trade):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-    INSERT OR REPLACE INTO sniper_trades (id, symbol, entry_price, highest_price, qty, tp_pct, sl_pct, trailing_cb, is_break_even, time_str)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO sniper_trades (id, symbol, entry_price, highest_price, qty, orig_qty, tp1_pct, tp2_pct, sl_pct, trailing_cb, tp1_hit, time_str)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         trade["id"], trade["symbol"], trade["entry_price"],
-        trade.get("highest_price", trade["entry_price"]), trade["qty"],
-        trade.get("tp_pct", 0.03), trade.get("sl_pct", 0.015),
-        trade.get("trailing_cb", 0.008), trade.get("is_break_even", 0),
-        trade["time_str"]
+        trade.get("highest_price", trade["entry_price"]), trade["qty"], trade["qty"],
+        trade.get("tp1_pct", 0.02), trade.get("tp2_pct", 0.04), trade.get("sl_pct", 0.015),
+        trade.get("trailing_cb", 0.008), 0, trade["time_str"]
     ))
     conn.commit()
     conn.close()
@@ -239,7 +265,6 @@ def archive_closed_trade(trade):
         trade["exit_price"], trade["qty"], trade["gross_pnl"], trade["fee_usd"],
         trade["net_pnl"], trade["reason"], trade["entry_time"], trade["exit_time"]
     ))
-    cursor.execute("DELETE FROM active_trades WHERE id = ?", (trade["id"],))
     conn.commit()
     conn.close()
 
