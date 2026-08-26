@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"><title>رادار القناص - Top Gainers Sniper</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"><title>رادار القناص الموحد</title>
 <style>
 :root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
@@ -12,12 +12,13 @@ body{background:var(--bg);color:var(--text);padding:8px;line-height:1.4}
 input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px;border-radius:6px;font-size:11px;width:100%}
 details{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}
 summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font-size:12px}
-.form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:6px;padding:8px}
-.gainers-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;margin-top:6px}
+.form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(85px,1fr));gap:6px;padding:8px}
+.gainers-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px;margin-top:6px}
 .gainer-card{background:#151e30;border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;justify-content:space-between}
 table{width:100%;border-collapse:collapse;text-align:right}
 th,td{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}
 th{color:var(--sub)}
+.hide-params .advanced-param{display:none}
 </style>
 </head>
 <body>
@@ -27,63 +28,110 @@ th{color:var(--sub)}
       <div style="font-size:10px;color:var(--sub)">USDT المتاح: <strong id="sniper-usdt" style="color:#10b981">0.00 $</strong></div>
     </div>
     <div style="display:flex;gap:4px">
-      <button class="btn" style="background:#0284c7;color:#fff" onclick="fetchGainers()">🔄 تحديث الرادار</button>
+      <button class="btn" style="background:#0284c7;color:#fff" onclick="fetchGainers()">🔄 تحديث</button>
       <a href="/" class="btn" style="background:#334155;color:#fff;text-decoration:none">🔙 الرئيسية</a>
     </div>
   </div>
 
-  <details open class="card">
-    <summary style="color:#38bdf8">📡 رادار أعلى العملات ارتفاعاً (Top Gainers) ▾</summary>
+  <!-- 1. شريط البحث السريع عن العملات -->
+  <div class="card" style="display:flex;gap:6px;align-items:center">
+    <input type="text" id="coin-search-input" placeholder="🔍 ابحث عن أي عملة (مثال: PEPE, SUI, DOGE)..." style="flex:1" onkeypress="if(event.key==='Enter') searchAndLoadCoin()">
+    <button class="btn" style="background:var(--primary);color:#fff" onclick="searchAndLoadCoin()">تحميل 🎯</button>
+  </div>
+
+  <!-- 2. رادار العملات وإعدادات الفلترة -->
+  <details open class="card" id="radar-card">
+    <summary style="display:flex;justify-content:space-between;align-items:center">
+      <span style="color:#38bdf8">📡 رادار العملات المتفجرة</span>
+      <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleRadarSettings(); event.stopPropagation();" title="إعدادات وفلاتر الرادار">⚙️</button>
+    </summary>
+    
+    <!-- لوحة إعدادات الرادار المخفية خلف الترس -->
+    <div id="radar-settings-panel" style="display:none;background:#090d16;padding:8px;border-radius:6px;margin:6px 0;border:1px solid var(--border)">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+        <div>
+          <label style="font-size:9.5px;color:var(--sub)">عدد العملات</label>
+          <select id="rad-limit" onchange="fetchGainers()">
+            <option value="6">6 عملات</option>
+            <option value="10" selected>10 عملات</option>
+            <option value="15">15 عملة</option>
+            <option value="20">20 عملة</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:9.5px;color:var(--sub)">معيار الفرز</label>
+          <select id="rad-sort" onchange="fetchGainers()">
+            <option value="price" selected>أعلى نسبة صعود %</option>
+            <option value="volume">أعلى حجم سيولة (Volume $)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:9.5px;color:var(--sub)">أدنى سيولة ($)</label>
+          <select id="rad-min-vol" onchange="fetchGainers()">
+            <option value="20000">20k $</option>
+            <option value="50000" selected>50k $</option>
+            <option value="100000">100k $</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
     <div class="gainers-grid" id="gainers-container">
-      <div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">جاري مسح السوق والسيولة...</div>
+      <div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">جاري مسح بيانات السوق...</div>
     </div>
   </details>
 
+  <!-- 3. الشارت الفني الموحد -->
   <details open class="card">
-    <summary style="color:#a78bfa">📈 الشارت الفني المباشر (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
+    <summary style="color:#a78bfa">📈 الشارت المباشر (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
     <div style="height:320px;width:100%;margin-top:6px" id="tv_chart_container">
       <iframe id="tv-iframe" src="https://s.tradingview.com/widgetembed/?symbol=MEXC%3ASOLUSDT&interval=5&theme=dark&style=1&locale=ar_AE&enablepublishing=false&hideideas=true" style="width:100%;height:100%;border:none"></iframe>
     </div>
   </details>
 
-  <details open class="card">
-    <summary style="color:#10b981">⚡ لوحة التنفيذ والتأمين الآلي (Break-even & Trailing) ▾</summary>
+  <!-- 4. لوحة القنص والتنفيذ مع زر الترس لإخفاء الإعدادات -->
+  <details open class="card hide-params" id="exec-panel-card">
+    <summary style="display:flex;justify-content:space-between;align-items:center">
+      <span style="color:#10b981">⚡ لوحة القنص والتنفيذ السريع</span>
+      <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleExecParams(); event.stopPropagation();" title="تعديل نسب الأهداف والوقف">⚙️</button>
+    </summary>
     <div class="form-row">
       <div>
-        <label style="font-size:10px;color:var(--sub)">العملة المستهدفة</label>
-        <input type="text" id="snp-sym" value="SOLUSDT">
+        <label style="font-size:10px;color:var(--sub)">العملة</label>
+        <input type="text" id="snp-sym" value="SOLUSDT" readonly style="background:#151e30;font-weight:bold;color:#38bdf8">
       </div>
       <div>
         <label style="font-size:10px;color:var(--sub)">المبلغ ($)</label>
         <input type="number" id="snp-size" value="10">
       </div>
       <div>
-        <label style="font-size:10px;color:var(--sub)">النوع</label>
+        <label style="font-size:10px;color:var(--sub)">نوع الأمر</label>
         <select id="snp-type">
-          <option value="CHASE_LIMIT">متتبع (Chase 0% Fee)</option>
-          <option value="MARKET">سعر السوق (Market)</option>
+          <option value="CHASE_LIMIT">متتبع (0% Fee)</option>
+          <option value="MARKET">سوق فوري (Market)</option>
         </select>
       </div>
-      <div>
+      <div class="advanced-param">
         <label style="font-size:10px;color:var(--sub)">جني الربح (TP %)</label>
         <input type="number" id="snp-tp" value="3.0" step="0.1">
       </div>
-      <div>
+      <div class="advanced-param">
         <label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label>
         <input type="number" id="snp-sl" value="1.5" step="0.1">
       </div>
-      <div>
-        <label style="font-size:10px;color:var(--sub)">متحرك (TS %)</label>
+      <div class="advanced-param">
+        <label style="font-size:10px;color:var(--sub)">الوقف المتحرك (TS %)</label>
         <input type="number" id="snp-ts" value="0.8" step="0.1">
       </div>
     </div>
     <div style="padding:0 8px 8px 8px">
-      <button class="btn" style="background:#10b981;color:#fff;width:100%;padding:8px;font-size:12px" onclick="executeSnipe()">🎯 إطلاق قنص العملة فوري</button>
+      <button class="btn" style="background:#10b981;color:#fff;width:100%;padding:10px;font-size:13px" onclick="executeSnipe()">🎯 إطلاق قنص العملة فوري</button>
     </div>
   </details>
 
+  <!-- 5. صفقات القناص المفتوحة -->
   <details open class="card">
-    <summary style="color:#fbbf24">📂 صفقات القناص المفتوحة (Live PnL) ▾</summary>
+    <summary style="color:#fbbf24">📂 صفقات القناص المفتوحة (انقر على العملة لفتح شارتها) ▾</summary>
     <div style="overflow-x:auto;padding-top:6px">
       <table id="sniper-pos-table">
         <thead>
@@ -101,6 +149,15 @@ th{color:var(--sub)}
 <script>
 let freeUsdt = 0;
 
+function toggleRadarSettings(){
+  const p = document.getElementById('radar-settings-panel');
+  p.style.display = p.style.display === 'none' ? 'block' : 'none';
+}
+
+function toggleExecParams(){
+  document.getElementById('exec-panel-card').classList.toggle('hide-params');
+}
+
 async function loadBal(){
   try{
     const r = await fetch('/api/data');
@@ -113,7 +170,11 @@ loadBal(); setInterval(loadBal, 3000);
 
 async function fetchGainers(){
   try{
-    const r = await fetch('/api/scanner');
+    const sortMode = document.getElementById('rad-sort').value;
+    const minVol = document.getElementById('rad-min-vol').value;
+    const limit = document.getElementById('rad-limit').value;
+
+    const r = await fetch(`/api/scanner?sort=${sortMode}&min_vol=${minVol}&limit=${limit}`);
     const gainers = await r.json();
     let h = '';
     if(Array.isArray(gainers) && gainers.length > 0){
@@ -124,35 +185,37 @@ async function fetchGainers(){
         <div class="gainer-card">
           <div>
             <div style="display:flex;justify-content:space-between;align-items:center">
-              <strong>${g.symbol.replace('USDT','')}</strong>
-              <span style="color:${color};font-weight:bold;font-size:12px">${chg>=0?'+':''}${chg.toFixed(2)}%</span>
+              <strong style="color:#f3f4f6">${g.symbol.replace('USDT','')}</strong>
+              <span style="color:${color};font-weight:bold;font-size:11px">${chg>=0?'+':''}${chg.toFixed(2)}%</span>
             </div>
-            <div style="font-size:11px;color:var(--sub);margin:2px 0">${parseFloat(g.lastPrice)}$</div>
-            <div style="font-size:9.5px;color:var(--sub)">فوليوم: ${(parseFloat(g.quoteVolume)/1000).toFixed(0)}k $</div>
+            <div style="font-size:10px;color:var(--sub);margin:2px 0">${parseFloat(g.lastPrice)}$</div>
+            <div style="font-size:9px;color:var(--sub)">فوليوم: ${(parseFloat(g.quoteVolume)/1000).toFixed(0)}k $</div>
           </div>
-          <div style="display:flex;gap:3px;margin-top:6px">
-            <button class="btn" style="background:#0284c7;color:#fff;flex:1" onclick="selectCoin('${g.symbol}')">🎯 قنص</button>
-            <button class="btn" style="background:#334155;color:#fff" onclick="loadChart('${g.symbol}')">📈</button>
-          </div>
+          <!-- زر موحد للشارت والقنص معاً -->
+          <button class="btn" style="background:#0284c7;color:#fff;width:100%;margin-top:6px" onclick="selectAndLoadUnified('${g.symbol}')">🎯 قنص وشارت</button>
         </div>`;
       });
     } else {
-      h = '<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">تعذر جلب بيانات السوق</div>';
+      h = '<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">لا توجد بيانات مطابقة للفلاتر</div>';
     }
     document.getElementById('gainers-container').innerHTML = h;
   }catch(e){}
 }
 fetchGainers(); setInterval(fetchGainers, 20000);
 
-function selectCoin(sym){
-  document.getElementById('snp-sym').value = sym;
-  loadChart(sym);
+function selectAndLoadUnified(sym){
+  const fullSym = sym.endsWith('USDT') ? sym : sym + 'USDT';
+  document.getElementById('snp-sym').value = fullSym;
+  document.getElementById('chart-symbol-name').innerText = 'MEXC:' + fullSym;
+  document.getElementById('tv-iframe').src = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${fullSym}&interval=5&theme=dark&style=1&locale=ar_AE&enablepublishing=false&hideideas=true`;
 }
 
-function loadChart(sym){
-  document.getElementById('chart-symbol-name').innerText = 'MEXC:' + sym;
-  const url = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${sym}&interval=5&theme=dark&style=1&locale=ar_AE&enablepublishing=false&hideideas=true`;
-  document.getElementById('tv-iframe').src = url;
+function searchAndLoadCoin(){
+  const raw = document.getElementById('coin-search-input').value.trim().toUpperCase();
+  if(!raw) return;
+  const target = raw.endsWith('USDT') ? raw : raw + 'USDT';
+  selectAndLoadUnified(target);
+  document.getElementById('coin-search-input').value = '';
 }
 
 async function executeSnipe(){
@@ -166,7 +229,7 @@ async function executeSnipe(){
   if(!sym || !size){ alert("أدخل رمز العملة والمبلغ"); return; }
 
   const payload = {
-    symbol: sym.endsWith("USDT") ? sym : sym + "USDT",
+    symbol: sym,
     size: size,
     order_type: o_type,
     tp_pct: tp / 100.0,
@@ -196,7 +259,8 @@ async function updateSniperPositions(){
         const beStatus = p.is_break_even ? '<span style="color:#10b981;font-weight:bold">مؤمن على الدخول ✅</span>' : 'عادي';
 
         h += `<tr>
-          <td><strong>${p.symbol}</strong></td>
+          <!-- الضغط على اسم العملة يفتح الشارت فوراً -->
+          <td><strong style="color:#38bdf8;cursor:pointer;text-decoration:underline" onclick="selectAndLoadUnified('${p.symbol}')">${p.symbol}</strong></td>
           <td>${p.entry_price}$</td>
           <td>${p.highest_price}$</td>
           <td>${p.qty}</td>
