@@ -13,6 +13,9 @@ input,select{background:#090d16;border:1px solid var(--border);color:#fff;paddin
 table{width:100%;border-collapse:collapse;text-align:right}
 th,td{padding:5px 4px;border-bottom:1px solid var(--border);font-size:11px}
 th{color:var(--sub)}
+details{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}
+summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font-size:12px}
+.form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;padding:8px}
 </style>
 </head>
 <body>
@@ -24,6 +27,7 @@ th{color:var(--sub)}
     <a href="/" class="btn" style="background:#334155;color:#fff;text-decoration:none">🔙 الرئيسية</a>
   </div>
 
+  <!-- لوحة الشراء والبيع -->
   <details open class="card">
     <summary style="font-weight:bold;cursor:pointer;color:#38bdf8;padding:4px">⚡ لوحة الشراء والبيع (Chase / Market / Limit) ▾</summary>
     <div style="padding-top:8px">
@@ -67,6 +71,7 @@ th{color:var(--sub)}
     </div>
   </details>
 
+  <!-- سجل الأوامر من MEXC -->
   <details open class="card">
     <summary style="font-weight:bold;cursor:pointer;color:#60a5fa;padding:4px">📜 سجل الأوامر الحقيقي المباشر من MEXC ▾</summary>
     <div style="display:flex;gap:4px;margin:6px 0">
@@ -87,17 +92,51 @@ th{color:var(--sub)}
     </div>
   </details>
 
+  <!-- النافذة المطوية في الأسفل: الإعدادات العامة ومحرك التتبع -->
+  <details class="card">
+    <summary style="font-weight:bold;cursor:pointer;color:#a78bfa;padding:4px">⚙️ الإعدادات العامة ومحرك التتبع (Chase Tuning) ▾</summary>
+    <div class="form-row">
+      <div>
+        <label style="font-size:10px;color:var(--sub)">مهلة التتبع الكلية (ثواني)</label>
+        <input type="number" id="cfg-timeout" value="12" step="1">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--sub)">فاصل تحديث الأمر (ثواني)</label>
+        <input type="number" id="cfg-interval" value="2.0" step="0.5">
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveGlobalSettings()">💾 حفظ الإعدادات</button>
+      </div>
+    </div>
+    <div style="font-size:9.5px;color:var(--sub);padding:0 8px 8px 8px">
+      * <strong>مهلة التتبع:</strong> المدة الزمنية لمطاردة السعر بأمر Limit قبل التحويل إلى Market تلقائياً.<br>
+      * <strong>فاصل التحديث:</strong> سرعة فحص الأوردر بوك وإلغاء/طرح أمر Limit جديد عند تحرك السعر (Maker 0% Fee).
+    </div>
+  </details>
+
 <script>
 let freeUsdt = 0;
-async function loadBal(){
+
+async function loadBalAndSettings(){
   try{
     const r = await fetch('/api/data');
     const d = await r.json();
     freeUsdt = d.real_balance_usdt || 0;
     document.getElementById('m-usdt').innerText = freeUsdt.toFixed(2) + ' $';
+
+    const rSet = await fetch('/api/get_global_settings');
+    const dSet = await rSet.json();
+    if(dSet.chase_timeout) document.getElementById('cfg-timeout').value = dSet.chase_timeout;
+    if(dSet.chase_interval) document.getElementById('cfg-interval').value = dSet.chase_interval;
   }catch(e){}
 }
-loadBal(); setInterval(loadBal, 3000);
+loadBalAndSettings();
+setInterval(function(){
+  fetch('/api/data').then(r=>r.json()).then(d=>{
+    freeUsdt = d.real_balance_usdt || 0;
+    document.getElementById('m-usdt').innerText = freeUsdt.toFixed(2) + ' $';
+  }).catch(()=>{});
+}, 3000);
 
 function setPct(p){ document.getElementById('t-qty').value = (freeUsdt * p).toFixed(2); }
 
@@ -122,8 +161,19 @@ async function execTrade(side){
     const r = await fetch('/api/terminal_trade', {method:'POST', body:JSON.stringify(payload)});
     const d = await r.json();
     alert(d.msg);
-    loadBal();
+    loadBalAndSettings();
   }
+}
+
+async function saveGlobalSettings(){
+  const timeout = document.getElementById('cfg-timeout').value;
+  const interval = document.getElementById('cfg-interval').value;
+  const r = await fetch('/api/save_global_settings', {
+    method: 'POST',
+    body: JSON.stringify({chase_timeout: timeout, chase_interval: interval})
+  });
+  const d = await r.json();
+  alert(d.msg);
 }
 
 async function fetchExchangeHistory(){
