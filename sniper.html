@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"><title>رادار القناص - Top Gainers Sniper</title>
+<style>
+:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--text);padding:8px;line-height:1.4}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
+.btn{padding:5px 8px;border:none;border-radius:5px;font-weight:bold;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;justify-content:center;gap:3px}
+.icon-btn{padding:3px 6px;font-size:13px;border-radius:5px;border:none;cursor:pointer}
+input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px;border-radius:6px;font-size:11px;width:100%}
+details{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}
+summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font-size:12px}
+.form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:6px;padding:8px}
+.gainers-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;margin-top:6px}
+.gainer-card{background:#151e30;border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;justify-content:space-between}
+table{width:100%;border-collapse:collapse;text-align:right}
+th,td{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}
+th{color:var(--sub)}
+</style>
+</head>
+<body>
+  <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <strong>🎯 رادار وقناص العملات المتفجرة</strong>
+      <div style="font-size:10px;color:var(--sub)">USDT المتاح: <strong id="sniper-usdt" style="color:#10b981">0.00 $</strong></div>
+    </div>
+    <div style="display:flex;gap:4px">
+      <button class="btn" style="background:#0284c7;color:#fff" onclick="fetchGainers()">🔄 تحديث الرادار</button>
+      <a href="/" class="btn" style="background:#334155;color:#fff;text-decoration:none">🔙 الرئيسية</a>
+    </div>
+  </div>
+
+  <!-- 1. رادار العملات الصاعدة (Top Gainers) -->
+  <details open class="card">
+    <summary style="color:#38bdf8">📡 رادار أعلى العملات ارتفاعاً (Top Gainers) ▾</summary>
+    <div class="gainers-grid" id="gainers-container">
+      <div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">جاري مسح السوق والسيولة...</div>
+    </div>
+  </details>
+
+  <!-- 2. الشارت التفاعلي -->
+  <details open class="card">
+    <summary style="color:#a78bfa">📈 الشارت الفني المباشر (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
+    <div style="height:320px;width:100%;margin-top:6px" id="tv_chart_container">
+      <iframe id="tv-iframe" src="https://s.tradingview.com/widgetembed/?symbol=MEXC%3ASOLUSDT&interval=5&theme=dark&style=1&locale=ar_AE&enablepublishing=false&hideideas=true" style="width:100%;height:100%;border:none"></iframe>
+    </div>
+  </details>
+
+  <!-- 3. لوحة القنص السريع والتأمين -->
+  <details open class="card">
+    <summary style="color:#10b981">⚡ لوحة التنفيذ والتأمين الآلي (Break-even & Trailing) ▾</summary>
+    <div class="form-row">
+      <div>
+        <label style="font-size:10px;color:var(--sub)">العملة المستهدفة</label>
+        <input type="text" id="snp-sym" value="SOLUSDT">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--sub)">المبلغ ($)</label>
+        <input type="number" id="snp-size" value="10">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--sub)">النوع</label>
+        <select id="snp-type">
+          <option value="CHASE_LIMIT">متتبع (Chase 0% Fee)</option>
+          <option value="MARKET">سعر السوق (Market)</option>
+        </select>
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--sub)">جني الربح (TP %)</label>
+        <input type="number" id="snp-tp" value="3.0" step="0.1">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label>
+        <input type="number" id="snp-sl" value="1.5" step="0.1">
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--sub)">متحرك (TS %)</label>
+        <input type="number" id="snp-ts" value="0.8" step="0.1">
+      </div>
+    </div>
+    <div style="padding:0 8px 8px 8px">
+      <button class="btn" style="background:#10b981;color:#fff;width:100%;padding:8px;font-size:12px" onclick="executeSnipe()">🎯 إطلاق قنص العملة فوري</button>
+    </div>
+  </details>
+
+  <!-- 4. صفقات القناص المفتوحة -->
+  <details open class="card">
+    <summary style="color:#fbbf24">📂 صفقات القناص المفتوحة (Live PnL) ▾</summary>
+    <div style="overflow-x:auto;padding-top:6px">
+      <table id="sniper-pos-table">
+        <thead>
+          <tr>
+            <th>العملة</th><th>الدخول</th><th>أعلى سعر</th><th>الكمية</th><th>Live PnL</th><th>حالة الوقف</th><th>الوقت</th><th>تسييل</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات قناص نشطة</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </details>
+
+<script>
+let freeUsdt = 0;
+
+async function loadBal(){
+  try{
+    const r = await fetch('/api/data');
+    const d = await r.json();
+    freeUsdt = d.real_balance_usdt || 0;
+    document.getElementById('sniper-usdt').innerText = freeUsdt.toFixed(2) + ' $';
+  }catch(e){}
+}
+loadBal(); setInterval(loadBal, 3000);
+
+async function fetchGainers(){
+  try{
+    const r = await fetch('/api/scanner');
+    const gainers = await r.json();
+    let h = '';
+    if(Array.isArray(gainers) && gainers.length > 0){
+      gainers.forEach(g => {
+        const chg = parseFloat(g.priceChangePercent);
+        const color = chg >= 0 ? 'var(--success)' : 'var(--danger)';
+        h += `
+        <div class="gainer-card">
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <strong>${g.symbol.replace('USDT','')}</strong>
+              <span style="color:${color};font-weight:bold;font-size:12px">${chg>=0?'+':''}${chg.toFixed(2)}%</span>
+            </div>
+            <div style="font-size:11px;color:var(--sub);margin:2px 0">${parseFloat(g.lastPrice)}$</div>
+            <div style="font-size:9.5px;color:var(--sub)">فوليوم: ${(parseFloat(g.quoteVolume)/1000).toFixed(0)}k $</div>
+          </div>
+          <div style="display:flex;gap:3px;margin-top:6px">
+            <button class="btn" style="background:#0284c7;color:#fff;flex:1" onclick="selectCoin('${g.symbol}')">🎯 قنص</button>
+            <button class="btn" style="background:#334155;color:#fff" onclick="loadChart('${g.symbol}')">📈</button>
+          </div>
+        </div>`;
+      });
+    } else {
+      h = '<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">تعذر جلب بيانات السوق</div>';
+    }
+    document.getElementById('gainers-container').innerHTML = h;
+  }catch(e){}
+}
+fetchGainers(); setInterval(fetchGainers, 20000);
+
+function selectCoin(sym){
+  document.getElementById('snp-sym').value = sym;
+  loadChart(sym);
+}
+
+function loadChart(sym){
+  document.getElementById('chart-symbol-name').innerText = 'MEXC:' + sym;
+  const url = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${sym}&interval=5&theme=dark&style=1&locale=ar_AE&enablepublishing=false&hideideas=true`;
+  document.getElementById('tv-iframe').src = url;
+}
+
+async function executeSnipe(){
+  const sym = document.getElementById('snp-sym').value.trim().toUpperCase();
+  const size = parseFloat(document.getElementById('snp-size').value);
+  const o_type = document.getElementById('snp-type').value;
+  const tp = parseFloat(document.getElementById('snp-tp').value);
+  const sl = parseFloat(document.getElementById('snp-sl').value);
+  const ts = parseFloat(document.getElementById('snp-ts').value);
+
+  if(!sym || !size){ alert("أدخل رمز العملة والمبلغ"); return; }
+
+  const payload = {
+    symbol: sym.endsWith("USDT") ? sym : sym + "USDT",
+    size: size,
+    order_type: o_type,
+    tp_pct: tp / 100.0,
+    sl_pct: sl / 100.0,
+    trailing_cb: ts / 100.0
+  };
+
+  if(confirm(`تأكيد إطلاق قنص ${payload.symbol} بقيمة ${size}$؟`)){
+    const r = await fetch('/api/sniper_buy', {method:'POST', body:JSON.stringify(payload)});
+    const d = await r.json();
+    alert(d.msg);
+    updateSniperPositions();
+  }
+}
+
+async function updateSniperPositions(){
+  try{
+    const r = await fetch('/api/sniper_data');
+    const d = await r.json();
+    let h = '';
+    if(d.positions && d.positions.length > 0){
+      d.positions.forEach(p => {
+        const curBid = d.market_prices[p.symbol] ? d.market_prices[p.symbol].bid : p.entry_price;
+        const livePnlVal = (curBid - p.entry_price) * p.qty;
+        const livePnlPct = ((curBid - p.entry_price) / p.entry_price) * 100.0;
+        const pnlColor = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
+        const beStatus = p.is_break_even ? '<span style="color:#10b981;font-weight:bold">مؤمن على الدخول ✅</span>' : 'عادي';
+
+        h += `<tr>
+          <td><strong>${p.symbol}</strong></td>
+          <td>${p.entry_price}$</td>
+          <td>${p.highest_price}$</td>
+          <td>${p.qty}</td>
+          <td style="color:${pnlColor};font-weight:bold">${livePnlVal>=0?'+':''}${livePnlVal.toFixed(3)}$ (${livePnlPct.toFixed(2)}%)</td>
+          <td>${beStatus}</td>
+          <td>${p.time_str}</td>
+          <td><button class="icon-btn" style="background:var(--danger);color:#fff" onclick="closeSniperPos('${p.id}', '${p.symbol}')">🔥</button></td>
+        </tr>`;
+      });
+    } else {
+      h = '<tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات قناص نشطة</td></tr>';
+    }
+    document.getElementById('sniper-pos-table').querySelector('tbody').innerHTML = h;
+  }catch(e){}
+}
+setInterval(updateSniperPositions, 2500);
+updateSniperPositions();
+
+async function closeSniperPos(id, sym){
+  if(confirm(`تسييل صفقة القناص لـ ${sym} فوري؟`)){
+    const r = await fetch('/api/sniper_close', {method:'POST', body:JSON.stringify({id:id, symbol:sym})});
+    const d = await r.json();
+    alert(d.msg);
+    updateSniperPositions();
+  }
+}
+</script>
+</body>
+</html>
