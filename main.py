@@ -28,6 +28,7 @@ SYMBOL_RULES = {}
 LAST_ENTRY_CANDLE = {}
 BOT_KEYS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C", "BOT_3"]
 
+# حالة النظام بما فيها صفقات القناص المستقلة
 shared_state = {
     "api_connected": False,
     "has_saved_keys": False,
@@ -40,6 +41,7 @@ shared_state = {
     "market_prices": {},
     "recent_logs": [],
     "open_limit_orders": [],
+    "sniper_positions": [],
     "start_timestamp": START_TIME,
     "current_day": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
     "bots": {}
@@ -83,6 +85,7 @@ def init_trades_from_db():
                     "sl_pct": float(r.get("sl_pct", 0.012)),
                     "time": r.get("time_str", "--:--")
                 })
+        shared_state["sniper_positions"] = database.load_sniper_trades()
     except Exception:
         pass
 
@@ -221,6 +224,9 @@ def get_total_bot_allocated_qty(asset_name):
         positions = shared_state["bots"][b]["active_positions"].get(sym, [])
         for p in positions:
             tot += float(p.get("qty", 0.0))
+    for sp in shared_state.get("sniper_positions", []):
+        if sp.get("symbol") == sym:
+            tot += float(sp.get("qty", 0.0))
     return tot
 
 def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", price=None):
@@ -300,6 +306,9 @@ def refresh_wallet_and_prices():
             shared_state["bots"][bKey]["symbols"] = syms
             for s in syms: all_active_symbols.add(s)
 
+        for sp in shared_state.get("sniper_positions", []):
+            all_active_symbols.add(sp["symbol"])
+
         ok, acc = mexc_private_request("/api/v3/account")
         if ok and isinstance(acc, dict) and "balances" in acc:
             shared_state["api_connected"] = True
@@ -351,11 +360,18 @@ def refresh_wallet_and_prices():
                 if curBid:
                     for p in pos_list:
                         total_pnl += (curBid - p["entry_price"]) * p["qty"]
+        
+        for sp in shared_state.get("sniper_positions", []):
+            curBid = shared_state["market_prices"].get(sp["symbol"], {}).get("bid", 0.0)
+            if curBid:
+                total_pnl += (curBid - sp["entry_price"]) * sp["qty"]
+
         shared_state["total_live_pnl"] = total_pnl
 
     except Exception:
         pass
 
+# محرك التداول المركزي ومراقبة القناص
 def trading_engine_loop():
     fetch_server_ip()
     init_trades_from_db()
@@ -375,8 +391,76 @@ def trading_engine_loop():
 
             refresh_wallet_and_prices()
 
-            configs = {k: database.get_bot_config(k) for k in BOT_KEYS}
+            # 🎯 متابعة صفقات القناص المستقلة (Break-even & Trailing Stop)
+            still_snipers = []
+            for sp in shared_state.get("sniper_positions", []):
+                sym = sp["symbol"]
+                p_info = shared_state["market_prices"].get(sym)
+                if not p_info or not p_info["bid"]:
+                    still_snipers.append(sp)
+                    continue
 
+                bid = p_info["bid"]
+                entry = sp["entry_price"]
+                highest = sp.get("highest_price", entry)
+                base_asset = sym.replace("USDT", "").replace("USDC", "")
+
+                if bid > highest:
+                    highest = bid
+                    sp["highest_price"] = highest
+                    database.update_sniper_trade(sp["id"], {"highest_price": highest})
+
+                tp_price = entry * (1.0 + sp.get("tp_pct", 0.03))
+                sl_price = entry * (1.0 - sp.get("sl_pct", 0.015))
+
+                # ميزة Break-Even: إذا حقق السعر نصف هدف الـ TP، يتم تأمين الصفقة على سعر الدخول
+                if not sp.get("is_break_even") and (highest >= entry * (1.0 + (sp.get("tp_pct", 0.03) * 0.5))):
+                    sp["is_break_even"] = 1
+                    database.update_sniper_trade(sp["id"], {"is_break_even": 1})
+                    add_log(f"🛡️ [Sniper] تأمين صفقة {sym} بنقل الوقف لسعر الدخول (Break-Even)", "system", "success")
+
+                effective_sl = entry if sp.get("is_break_even") else sl_price
+
+                # ميزة Trailing Stop للقناص
+                cb_pct = sp.get("trailing_cb", 0.008)
+                trailing_sl = highest * (1.0 - cb_pct)
+                if highest >= entry * (1.0 + cb_pct):
+                    effective_sl = max(effective_sl, trailing_sl)
+
+                hit_tp = bid >= tp_price
+                hit_sl = bid <= effective_sl
+
+                if hit_tp or hit_sl:
+                    reason = "🎯 TP القناص" if hit_tp else ("🔄 TS القناص" if effective_sl > sl_price else "🛑 SL القناص")
+                    avail = get_asset_free_balance(base_asset)
+                    sell_qty = min(sp["qty"], avail)
+
+                    if float(format_quantity(sym, sell_qty)) > 0:
+                        ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+                        if ok:
+                            gross_pnl = (bid - entry) * sell_qty
+                            fee_usd = (entry * sell_qty * 0.001) + (bid * sell_qty * 0.001)
+                            net_pnl = gross_pnl - fee_usd
+                            database.archive_closed_trade({
+                                "id": sp["id"], "bot_name": "SNIPER", "symbol": sym,
+                                "entry_price": entry, "exit_price": bid,
+                                "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "net_pnl": net_pnl, "reason": reason,
+                                "entry_time": sp["time_str"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
+                            })
+                            database.delete_sniper_trade(sp["id"])
+                            add_log(f"💰 [Sniper] إغلاق {sym} | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                        else:
+                            still_snipers.append(sp)
+                    else:
+                        database.delete_sniper_trade(sp["id"])
+                else:
+                    still_snipers.append(sp)
+
+            shared_state["sniper_positions"] = still_snipers
+
+            # متابعة بقية البوتات
+            configs = {k: database.get_bot_config(k) for k in BOT_KEYS}
             for bKey, cfg in configs.items():
                 syms = parse_symbols_list(cfg.get("symbols", ""))
                 shared_state["bots"][bKey]["status"] = cfg.get("status", "PAUSED")
@@ -583,193 +667,6 @@ def trading_engine_loop():
 
         time.sleep(7)
 
-LOGIN_HTML = """<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>دخول</title>
-<style>
-body{background:#090d16;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-.box{background:#111827;padding:24px;border-radius:12px;width:300px;border:1px solid #1f293d}
-input{width:100%;padding:10px;margin:8px 0;background:#090d16;border:1px solid #1f293d;color:#fff;border-radius:6px;box-sizing:border-box}
-button{width:100%;padding:10px;background:#3b82f6;color:#fff;border:none;border-radius:6px;font-weight:bold;cursor:pointer}
-</style>
-</head>
-<body>
-<div class="box">
-  <h3 style="text-align:center;margin-bottom:12px">🔐 تسجيل الدخول</h3>
-  <form id="f">
-    <input type="text" id="u" placeholder="اسم المستخدم" required>
-    <input type="password" id="p" placeholder="كلمة المرور" required>
-    <button type="submit">دخول</button>
-  </form>
-</div>
-<script>
-document.getElementById('f').onsubmit=async(e)=>{
-  e.preventDefault();
-  const r=await fetch('/api/login',{method:'POST',body:JSON.stringify({username:u.value,password:p.value})});
-  if(r.ok) location.href='/'; else alert('خطأ في بيانات الدخول');
-};
-</script>
-</body>
-</html>"""
-
-ANALYTICS_HTML = """<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>التداول اليدوي وسجل المنصة</title>
-<style>
-:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
-*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
-body{background:var(--bg);color:var(--text);padding:10px;line-height:1.4}
-.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
-.btn{padding:6px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:11px}
-input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px;border-radius:6px;font-size:11px;width:100%}
-.pct-btn{background:#151e30;border:1px solid var(--border);color:var(--sub);padding:3px 6px;border-radius:4px;cursor:pointer;font-size:10px}
-table{width:100%;border-collapse:collapse;text-align:right}
-th,td{padding:5px 4px;border-bottom:1px solid var(--border);font-size:11px}
-th{color:var(--sub)}
-</style>
-</head>
-<body>
-  <div class="card" style="display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <strong>📊 مركز التداول وسجل MEXC</strong>
-      <div style="font-size:10px;color:var(--sub)">USDT المتاح: <strong id="m-usdt" style="color:#10b981">0.00 $</strong></div>
-    </div>
-    <a href="/" class="btn" style="background:#334155;color:#fff;text-decoration:none">🔙 الرئيسية</a>
-  </div>
-
-  <details open class="card">
-    <summary style="font-weight:bold;cursor:pointer;color:#38bdf8;padding:4px">⚡ لوحة الشراء والبيع (Chase / Market / Limit) ▾</summary>
-    <div style="padding-top:8px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
-        <div>
-          <label style="font-size:10px;color:var(--sub)">العملة:</label>
-          <input type="text" id="t-sym" value="SOLUSDT">
-        </div>
-        <div>
-          <label style="font-size:10px;color:var(--sub)">النوع:</label>
-          <select id="t-type" onchange="document.getElementById('limit-price-box').style.display = this.value === 'LIMIT' ? 'block' : 'none'">
-            <option value="CHASE_LIMIT" selected>متتبع ليميت (Chase 0% Fee)</option>
-            <option value="MARKET">سعر السوق (Market)</option>
-            <option value="LIMIT">أمر معلق (Limit)</option>
-          </select>
-        </div>
-      </div>
-
-      <div id="limit-price-box" style="display:none;margin-bottom:6px">
-        <label style="font-size:10px;color:var(--sub)">سعر الليميت ($):</label>
-        <input type="number" id="t-price" placeholder="أدخل السعر">
-      </div>
-
-      <div style="margin-bottom:8px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-          <label style="font-size:10px;color:var(--sub)">الكمية أو القيمة:</label>
-          <div style="display:flex;gap:3px">
-            <button class="pct-btn" onclick="setPct(0.25)">25%</button>
-            <button class="pct-btn" onclick="setPct(0.50)">50%</button>
-            <button class="pct-btn" onclick="setPct(0.75)">75%</button>
-            <button class="pct-btn" onclick="setPct(1.00)">100%</button>
-          </div>
-        </div>
-        <input type="number" id="t-qty" placeholder="القيمة أو الكمية">
-      </div>
-
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
-        <button class="btn" style="background:#10b981;color:#fff" onclick="execTrade('BUY')">🟢 شراء</button>
-        <button class="btn" style="background:#ef4444;color:#fff" onclick="execTrade('SELL')">🔴 بيع</button>
-      </div>
-    </div>
-  </details>
-
-  <details open class="card">
-    <summary style="font-weight:bold;cursor:pointer;color:#60a5fa;padding:4px">📜 سجل الأوامر الحقيقي المباشر من MEXC ▾</summary>
-    <div style="display:flex;gap:4px;margin:6px 0">
-      <input type="text" id="hist-sym" value="SOLUSDT" style="width:140px">
-      <button class="btn" style="background:#0284c7;color:#fff" onclick="fetchExchangeHistory()">🔍 جلب السجل</button>
-    </div>
-    <div style="overflow-x:auto">
-      <table id="mexc-history-table">
-        <thead>
-          <tr>
-            <th>العملة</th><th>النوع</th><th>الاتجاه</th><th>السعر</th><th>المنفذ</th><th>الحالة</th><th>الوقت</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td colspan="7" style="text-align:center;color:var(--sub)">اضغط جلب السجل لعرض أوامر المنصة</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </details>
-
-<script>
-let freeUsdt = 0;
-async function loadBal(){
-  try{
-    const r = await fetch('/api/data');
-    const d = await r.json();
-    freeUsdt = d.real_balance_usdt || 0;
-    document.getElementById('m-usdt').innerText = freeUsdt.toFixed(2) + ' $';
-  }catch(e){}
-}
-loadBal(); setInterval(loadBal, 3000);
-
-function setPct(p){ document.getElementById('t-qty').value = (freeUsdt * p).toFixed(2); }
-
-async function execTrade(side){
-  const sym = document.getElementById('t-sym').value.trim().toUpperCase();
-  const type = document.getElementById('t-type').value;
-  const val = parseFloat(document.getElementById('t-qty').value);
-  const price = parseFloat(document.getElementById('t-price').value);
-
-  if(!sym || !val){ alert('يرجى ملء رمز العملة والقيمة'); return; }
-  if(type === 'LIMIT' && (!price || price <= 0)){ alert('يرجى تحديد السعر'); return; }
-
-  const payload = {
-    symbol: sym.endsWith('USDT') ? sym : sym + 'USDT',
-    side: side,
-    order_type: type,
-    val: val,
-    price: price
-  };
-
-  if(confirm('تأكيد تنفيذ أمر ' + side + ' لـ ' + payload.symbol + ' بقيمة ' + val + '؟')){
-    const r = await fetch('/api/terminal_trade', {method:'POST', body:JSON.stringify(payload)});
-    const d = await r.json();
-    alert(d.msg);
-    loadBal();
-  }
-}
-
-async function fetchExchangeHistory(){
-  const sym = document.getElementById('hist-sym').value.trim().toUpperCase();
-  if(!sym){ alert("أدخل رمز العملة"); return; }
-  const fullSym = sym.endsWith("USDT") ? sym : sym + "USDT";
-  
-  const r = await fetch('/api/exchange_orders?symbol=' + fullSym);
-  const orders = await r.json();
-  let h = '';
-  if(Array.isArray(orders) && orders.length > 0){
-    orders.forEach(o => {
-      const sideColor = o.side === 'BUY' ? 'var(--success)' : 'var(--danger)';
-      h += '<tr>' +
-        '<td><strong>' + o.symbol + '</strong></td>' +
-        '<td>' + o.type + '</td>' +
-        '<td style="color:' + sideColor + ';font-weight:bold">' + o.side + '</td>' +
-        '<td>' + parseFloat(o.price) + '$</td>' +
-        '<td>' + parseFloat(o.executedQty) + ' / ' + parseFloat(o.origQty) + '</td>' +
-        '<td><span style="font-weight:bold">' + o.status + '</span></td>' +
-        '<td>' + new Date(o.time).toLocaleTimeString() + '</td>' +
-      '</tr>';
-    });
-  } else {
-    h = '<tr><td colspan="7" style="text-align:center;color:var(--sub)">لا توجد أوامر مسجلة لهذه العملة</td></tr>';
-  }
-  document.getElementById('mexc-history-table').querySelector('tbody').innerHTML = h;
-}
-</script>
-</body>
-</html>"""
-
 def get_bot_html_fragment(b_key, b_name, b_tf, is_b3=False):
     pfx = b_key.lower()
     tf_markup = f"""
@@ -951,6 +848,7 @@ summary{{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;fon
     <div>
       <div style="display:flex;align-items:center;gap:6px">
         <strong>🎛️ Command Hub</strong>
+        <a href="/sniper" style="color:#38bdf8;font-size:11px;text-decoration:none;background:#1e293b;padding:2px 6px;border-radius:4px">🎯 رادار القناص ↗</a>
         <a href="/analytics" style="color:#60a5fa;font-size:11px;text-decoration:none;background:#1e293b;padding:2px 6px;border-radius:4px">📊 تداول يدوي ↗</a>
       </div>
       <div style="font-size:10px;color:var(--sub)">Live PnL الكلي: <strong id="total-live-pnl-val" style="color:#10b981">+0.00$</strong></div>
@@ -1546,6 +1444,9 @@ update();
 </html>"""
     return header_and_tabs
 
+# =====================================================================
+# 🛡️ خادم الويب ومسارات الرادار والقناص
+# =====================================================================
 class WebHandler(http.server.BaseHTTPRequestHandler):
     def is_auth(self):
         c = cookies.SimpleCookie(self.headers.get('Cookie'))
@@ -1563,6 +1464,35 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
         if self.path == '/api/data':
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
             self.wfile.write(json.dumps(shared_state, ensure_ascii=False).encode('utf-8'))
+        
+        # 📡 مسار سكانر العملات الصاعدة (Top Gainers)
+        elif self.path == '/api/scanner':
+            try:
+                url = f"{BASE_URL}/api/v3/ticker/24hr"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, context=ssl_ctx, timeout=6) as res:
+                    tickers = json.loads(res.read().decode('utf-8'))
+                    usdt_tickers = [
+                        t for t in tickers 
+                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) > 50000
+                    ]
+                    usdt_tickers.sort(key=lambda x: float(x.get("priceChangePercent", 0)), reverse=True)
+                    top_gainers = usdt_tickers[:14]
+                    self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+                    self.wfile.write(json.dumps(top_gainers, ensure_ascii=False).encode('utf-8'))
+            except Exception as e:
+                self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+                self.wfile.write(b"[]")
+
+        # 🎯 مسار بيانات صفقات القناص المستقلة
+        elif self.path == '/api/sniper_data':
+            res_data = {
+                "positions": shared_state.get("sniper_positions", []),
+                "market_prices": shared_state.get("market_prices", {})
+            }
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps(res_data, ensure_ascii=False).encode('utf-8'))
+
         elif self.path.startswith('/api/exchange_orders'):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
@@ -1577,6 +1507,14 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             trades = database.get_closed_trades(bot_name)
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps(trades, ensure_ascii=False).encode('utf-8'))
+        elif self.path == '/sniper':
+            try:
+                with open("sniper.html", "r", encoding="utf-8") as f:
+                    html_c = f.read()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(html_c.encode('utf-8'))
+            except Exception:
+                self.send_response(404); self.end_headers()
         elif self.path == '/analytics':
             self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
             self.wfile.write(ANALYTICS_HTML.encode('utf-8'))
@@ -1605,7 +1543,76 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
         if not self.is_auth():
             self.send_response(401); self.end_headers(); return
 
-        if self.path == '/api/change_password':
+        # 🎯 تنفيذ أمر قنص مستقل
+        if self.path == '/api/sniper_buy':
+            sym = data.get("symbol")
+            size = float(data.get("size", 10.0))
+            o_type = data.get("order_type", "CHASE_LIMIT")
+            tp_pct = float(data.get("tp_pct", 0.03))
+            sl_pct = float(data.get("sl_pct", 0.015))
+            ts_cb = float(data.get("trailing_cb", 0.008))
+
+            bid, ask = get_orderbook(sym)
+            if ask:
+                q = float(format_quantity(sym, size / ask))
+                if o_type == "CHASE_LIMIT":
+                    ok, res = execute_smart_chase_order(sym, "BUY", quote_qty=size)
+                else:
+                    ok, res = place_order(sym, "BUY", qty=q, quote_qty=size, order_type="MARKET")
+
+                if ok:
+                    snp_id = f"snp_{int(time.time()*1000)}"
+                    time_str = datetime.now(timezone.utc).strftime("%H:%M")
+                    snp_trade = {
+                        "id": snp_id, "symbol": sym, "entry_price": ask,
+                        "highest_price": ask, "qty": q, "tp_pct": tp_pct,
+                        "sl_pct": sl_pct, "trailing_cb": ts_cb,
+                        "is_break_even": 0, "time_str": time_str
+                    }
+                    database.insert_sniper_trade(snp_trade)
+                    shared_state["sniper_positions"].append(snp_trade)
+                    msg = f"🎯 تم قنص {sym} بنجاح عند {ask}$"
+                    add_log(msg, "buys", "primary")
+                else:
+                    msg = f"❌ فشل القنص: {res}"
+            else:
+                msg = "تعذر قراءة سعر العملة"
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
+
+        # 🎯 إغلاق صفقة قناص يدوياً
+        elif self.path == '/api/sniper_close':
+            s_id = data.get("id")
+            sym = data.get("symbol")
+            bid, ask = get_orderbook(sym)
+            base_asset = sym.replace("USDT", "").replace("USDC", "")
+            found = False
+            for sp in shared_state.get("sniper_positions", []):
+                if sp["id"] == s_id:
+                    found = True
+                    avail = get_asset_free_balance(base_asset)
+                    sell_qty = min(sp["qty"], avail)
+                    if float(format_quantity(sym, sell_qty)) > 0:
+                        ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+                        cur_p = bid if bid else sp["entry_price"]
+                        gross_pnl = (cur_p - sp["entry_price"]) * sell_qty
+                        fee_usd = (sp["entry_price"] * sell_qty * 0.001) + (cur_p * sell_qty * 0.001)
+                        net_pnl = gross_pnl - fee_usd
+                        database.archive_closed_trade({
+                            "id": s_id, "bot_name": "SNIPER", "symbol": sym,
+                            "entry_price": sp["entry_price"], "exit_price": cur_p,
+                            "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                            "net_pnl": net_pnl, "reason": "إغلاق يدوي للقناص",
+                            "entry_time": sp["time_str"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
+                        })
+                    database.delete_sniper_trade(s_id)
+                    add_log(f"🔥 تسييل صفقة قناص {sym}", "sells", "danger")
+                    break
+            shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["id"] != s_id]
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": "✅ تم إغلاق وتسييل صفقة القناص"}, ensure_ascii=False).encode('utf-8'))
+
+        elif self.path == '/api/change_password':
             new_p = data.get("new_password", "").strip()
             if new_p:
                 database.change_password(new_p)
