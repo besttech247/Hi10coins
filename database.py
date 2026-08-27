@@ -23,7 +23,6 @@ def init_db():
     )
     """)
 
-    # إعدادات عامة للتحكم في الملاحقة والعمولات
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS global_settings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,7 +176,7 @@ def load_all_active_trades():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM active_trades")
+    cursor.execute("SELECT * FROM active_trades ORDER BY time_str DESC")
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -217,7 +216,7 @@ def load_sniper_trades():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM sniper_trades")
+    cursor.execute("SELECT * FROM sniper_trades ORDER BY time_str DESC")
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -268,7 +267,7 @@ def archive_closed_trade(trade):
     conn.commit()
     conn.close()
 
-def get_closed_trades(bot_name=None, limit=50):
+def get_closed_trades(bot_name=None, limit=60):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
