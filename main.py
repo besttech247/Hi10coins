@@ -66,6 +66,9 @@ for k in BOT_KEYS:
         "active_positions": {}
     }
 
+def get_current_iso_time():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
 def init_trades_from_db():
     try:
         rows = database.load_all_active_trades()
@@ -243,7 +246,8 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
         else:
             return False, "تحديد الكمية مطلوب"
     
-    add_log(f"📤 طلب {side.upper()} {symbol} ({order_type})", "orders", "info")
+    price_info = f" بسعر {price}$" if price else (f" بقيمة {quote_qty}$" if quote_qty else f" بكمية {qty}")
+    add_log(f"📤 طلب {side.upper()} {symbol} ({order_type}){price_info}", "orders", "info")
     ok, res = mexc_private_request("/api/v3/order", method="POST", params=params)
     if not ok:
         add_log(f"❌ خطأ {symbol}: {res}", "orders", "danger")
@@ -425,7 +429,7 @@ def trading_engine_loop():
                             sp["tp1_hit"] = 1
                             sp["qty"] -= half_qty
                             database.update_sniper_trade(sp["id"], {"tp1_hit": 1, "qty": sp["qty"]})
-                            add_log(f"🎯 [Sniper] تحقيق هدف TP1 لـ {sym} | بيع 50% وتأمين الباقي على الدخول", "sells", "success")
+                            add_log(f"🎯 [Sniper] تحقيق هدف TP1 لـ {sym} | بيع 50% ({half_qty}) عند {bid}$ وتأمين الباقي على الدخول", "sells", "success")
 
                 effective_sl = entry if sp.get("tp1_hit") else sl_price
                 cb_pct = sp.get("trailing_cb", 0.008)
@@ -452,10 +456,10 @@ def trading_engine_loop():
                                 "entry_price": entry, "exit_price": bid,
                                 "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                 "net_pnl": net_pnl, "reason": reason,
-                                "entry_time": sp["time_str"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
+                                "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
                             })
                             database.delete_sniper_trade(sp["id"])
-                            add_log(f"💰 [Sniper] إغلاق نهائي لـ {sym} | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                            add_log(f"💰 [Sniper] إغلاق {sym} | خروج: {bid}$ | صافي: {net_pnl:+.3f}$ | عمولة: {fee_usd:.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                         else:
                             still_snipers.append(sp)
                     else:
@@ -558,9 +562,9 @@ def trading_engine_loop():
                                                 "entry_price": pos["entry_price"], "exit_price": bid,
                                                 "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                                 "net_pnl": net_pnl, "reason": reason,
-                                                "entry_time": pos["time"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
+                                                "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                             })
-                                            add_log(f"💰 [{bKey}] بيع {sym} | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                            add_log(f"💰 [{bKey}] بيع {sym} | خروج: {bid}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                         else:
                                             if "30005" in str(res) or "Oversold" in str(res):
                                                 database.delete_active_trade(pos['id'])
@@ -590,7 +594,7 @@ def trading_engine_loop():
                                             if ok:
                                                 LAST_ENTRY_CANDLE[lock_key] = latest_candle_time
                                                 trade_id = f"{bKey.lower()}_{int(time.time()*1000)}"
-                                                time_str = datetime.now(timezone.utc).strftime("%H:%M")
+                                                time_str = get_current_iso_time()
                                                 t_obj = {
                                                     'id': trade_id, 'bot_name': bKey, 'symbol': sym,
                                                     'entry_price': ask, 'highest_price': ask, 'qty': q,
@@ -661,9 +665,9 @@ def trading_engine_loop():
                                         "entry_price": entry, "exit_price": bid,
                                         "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                         "net_pnl": net_pnl, "reason": reason,
-                                        "entry_time": pos["time"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
+                                        "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
-                                    add_log(f"💰 [Bot 3] إغلاق {sym} | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    add_log(f"💰 [Bot 3] إغلاق {sym} | خروج: {bid}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                 else:
                                     if "30005" in str(res) or "Oversold" in str(res):
                                         database.delete_active_trade(pos['id'])
@@ -861,7 +865,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
 
                 if ok:
                     snp_id = f"snp_{int(time.time()*1000)}"
-                    time_str = datetime.now(timezone.utc).strftime("%H:%M")
+                    time_str = get_current_iso_time()
                     snp_trade = {
                         "id": snp_id, "symbol": sym, "entry_price": ask,
                         "highest_price": ask, "qty": q, "orig_qty": q,
@@ -871,7 +875,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     }
                     database.insert_sniper_trade(snp_trade)
                     shared_state["sniper_positions"].append(snp_trade)
-                    msg = f"🎯 تم قنص {sym} بنجاح عند {ask}$"
+                    msg = f"🎯 تم قنص {sym} بنجاح عند {ask}$ (كمية: {q})"
                     add_log(msg, "buys", "primary")
                 else:
                     msg = f"❌ فشل القنص: {res}"
@@ -900,10 +904,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                             "entry_price": sp["entry_price"], "exit_price": cur_p,
                             "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                             "net_pnl": net_pnl, "reason": "إغلاق يدوي للقناص",
-                            "entry_time": sp["time_str"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
+                            "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
                         })
                     database.delete_sniper_trade(s_id)
-                    add_log(f"🔥 تسييل صفقة قناص {sym}", "sells", "danger")
+                    add_log(f"🔥 تسييل صفقة قناص {sym} يدوي", "sells", "danger")
                     break
             shared_state["sniper_positions"] = [p for p in shared_state.get("sniper_positions", []) if p["id"] != s_id]
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
@@ -1019,7 +1023,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 
                 if ok:
                     trade_id = f"{b_name.lower()}_{int(time.time()*1000)}"
-                    time_str = datetime.now(timezone.utc).strftime("%H:%M")
+                    time_str = get_current_iso_time()
                     t_obj = {
                         'id': trade_id, 'bot_name': b_name, 'symbol': sym,
                         'entry_price': ask, 'highest_price': ask, 'qty': q,
@@ -1073,7 +1077,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                             "entry_price": p["entry_price"], "exit_price": cur_price,
                             "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                             "net_pnl": net_pnl, "reason": "يدوي (Manual)",
-                            "entry_time": p["time"], "exit_time": datetime.now(timezone.utc).strftime("%H:%M")
+                            "entry_time": p["time"], "exit_time": get_current_iso_time()
                         })
                         add_log(f"🔥 تسييل {sym} في {b_name} بسعر {cur_price}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
                     else:
