@@ -25,13 +25,14 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
 table{width:100%;border-collapse:collapse;text-align:right}
 th,td{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}
 th{color:var(--sub)}
+.manage-ctrl{display:none}
+.manage-mode .manage-ctrl{display:table-cell}
 .hide-params .advanced-param{display:none}
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:#00000088;display:none;align-items:center;justify-content:center;z-index:99}
 .modal{background:#111827;border:1px solid var(--border);padding:14px;border-radius:10px;width:290px}
 </style>
 </head>
 <body>
-  <!-- هيدر موحد متناسق مع الرئيسية -->
   <div class="header-box">
     <div>
       <div style="display:flex;align-items:center;gap:6px">
@@ -49,13 +50,11 @@ th{color:var(--sub)}
     </div>
   </div>
 
-  <!-- البحث السريع عن أي عملة -->
   <div class="card" style="display:flex;gap:6px;align-items:center">
     <input type="text" id="coin-search-input" placeholder="🔍 ابحث عن أي عملة (مثال: PEPE, SUI, DOGE)..." style="flex:1" onkeypress="if(event.key==='Enter') searchAndLoadCoin()">
     <button class="btn" style="background:var(--primary);color:#fff" onclick="searchAndLoadCoin()">تحميل 🎯</button>
   </div>
 
-  <!-- 1. رادار العملات مع خيارات الفريمات والديفولت 4 عملات -->
   <details open class="card" id="radar-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <span style="color:#38bdf8">📡 رادار العملات المتفجرة</span>
@@ -96,7 +95,6 @@ th{color:var(--sub)}
     </div>
   </details>
 
-  <!-- 2. الشارت الفني الموحد -->
   <details open class="card">
     <summary style="color:#a78bfa">📈 الشارت المباشر (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
     <div style="height:300px;width:100%;margin-top:6px" id="tv_chart_container">
@@ -104,7 +102,6 @@ th{color:var(--sub)}
     </div>
   </details>
 
-  <!-- 3. لوحة القنص والتنفيذ مع TP متعدد و SL و Trailing -->
   <details open class="card hide-params" id="exec-panel-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <span style="color:#10b981">⚡ لوحة القنص والتنفيذ السريع</span>
@@ -148,11 +145,13 @@ th{color:var(--sub)}
     </div>
   </details>
 
-  <!-- 4. تابات صفقات القناص (مفتوحة / معلقة / مغلقة) مع الترس -->
   <details open class="card" id="sniper-trades-box">
     <summary style="display:flex;justify-content:space-between;align-items:center">
-      <span style="color:#fbbf24">📂 إدارة صفقات وأوامر القناص</span>
-      <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('sniper-trades-box'); event.stopPropagation();" title="إظهار أزرار التحكم">⚙️</button>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="color:#fbbf24">📂 إدارة صفقات وأوامر القناص</span>
+        <span style="font-size:11px;color:var(--sub)">(Live PnL: <strong id="snp-live-pnl-header" style="color:#10b981">+0.00$</strong>)</span>
+      </div>
+      <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('sniper-trades-box'); event.stopPropagation();" title="إظهار/إخفاء أزرار الإجراءات">⚙️</button>
     </summary>
     
     <div class="inner-tabs">
@@ -161,19 +160,18 @@ th{color:var(--sub)}
       <button class="inner-tab" onclick="switchInnerTab('p-closed', this)">📜 الأرشيف والعمولات</button>
     </div>
 
-    <!-- الصفقات المفتوحة -->
     <div id="p-open" class="inner-pane active">
       <div style="overflow-x:auto">
         <table id="sniper-pos-table">
           <thead>
             <tr>
-              <th onclick="sortTable('sniper-pos-table', 0)">العملة ⇕</th>
+              <th onclick="sortTable('sniper-pos-table', 0)" style="cursor:pointer">العملة ⇕</th>
               <th>الدخول</th>
               <th>أعلى سعر</th>
               <th>الكمية</th>
-              <th onclick="sortTable('sniper-pos-table', 4)">Live PnL ⇕</th>
+              <th onclick="sortTable('sniper-pos-table', 4)" style="cursor:pointer">Live PnL ⇕</th>
               <th>حالة الهدف</th>
-              <th>الوقت</th>
+              <th onclick="sortTable('sniper-pos-table', 6)" style="cursor:pointer">الوقت والتاريخ ⇕</th>
               <th class="manage-ctrl">إجراءات</th>
             </tr>
           </thead>
@@ -184,28 +182,25 @@ th{color:var(--sub)}
       </div>
     </div>
 
-    <!-- الأوامر المعلقة -->
     <div id="p-pending" class="inner-pane">
       <div style="overflow-x:auto">
         <table id="snp-pending-table">
-          <thead><tr><th>العملة</th><th>النوع</th><th>السعر</th><th>الكمية</th><th>الوقت</th><th class="manage-ctrl">إلغاء</th></tr></thead>
+          <thead><tr><th>العملة</th><th>النوع</th><th>السعر</th><th>الكمية</th><th>الوقت والتاريخ</th><th class="manage-ctrl">إلغاء</th></tr></thead>
           <tbody><tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أوامر معلقة</td></tr></tbody>
         </table>
       </div>
     </div>
 
-    <!-- الأرشيف والمغلقة -->
     <div id="p-closed" class="inner-pane">
       <div style="overflow-x:auto">
         <table id="snp-closed-table">
-          <thead><tr><th>العملة</th><th>الدخول</th><th>الخروج</th><th>الكمية</th><th>صافي الربح</th><th>العمولة</th><th>السبب</th><th>الوقت</th></tr></thead>
+          <thead><tr><th>العملة</th><th>الدخول</th><th>الخروج</th><th>الكمية</th><th>صافي الربح</th><th>العمولة</th><th>السبب</th><th onclick="sortTable('snp-closed-table', 7)" style="cursor:pointer">الوقت والتاريخ ⇕</th></tr></thead>
           <tbody><tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات مؤرشفة</td></tr></tbody>
         </table>
       </div>
     </div>
   </details>
 
-  <!-- Modal تعديل صفقة القناص -->
   <div class="modal-overlay" id="snp-edit-modal">
     <div class="modal">
       <h4 style="margin-bottom:6px;font-size:12px">✏️ تعديل صفقة القناص</h4>
@@ -241,7 +236,8 @@ function toggleExecParams(){
 }
 
 function toggleManage(boxId){
-  document.getElementById(boxId).classList.toggle('manage-mode');
+  const el = document.getElementById(boxId);
+  if(el) el.classList.toggle('manage-mode');
 }
 
 async function loadBal(){
@@ -338,10 +334,12 @@ async function updateSniperPositions(){
     const r = await fetch('/api/sniper_data');
     const d = await r.json();
     let h = '';
+    let totLive = 0;
     if(d.positions && d.positions.length > 0){
       d.positions.forEach(p => {
         const curBid = d.market_prices[p.symbol] ? d.market_prices[p.symbol].bid : p.entry_price;
         const livePnlVal = (curBid - p.entry_price) * p.qty;
+        totLive += livePnlVal;
         const livePnlPct = ((curBid - p.entry_price) / p.entry_price) * 100.0;
         const pnlColor = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
         const beStatus = p.tp1_hit ? '<span style="color:#10b981;font-weight:bold">TP1 محقق (مؤمن) ✅</span>' : 'قيد الانتظار';
@@ -367,8 +365,11 @@ async function updateSniperPositions(){
       h = '<tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات قناص نشطة</td></tr>';
     }
     document.getElementById('sniper-pos-table').querySelector('tbody').innerHTML = h;
+    
+    const liveHeaderEl = document.getElementById('snp-live-pnl-header');
+    liveHeaderEl.innerText = (totLive >= 0 ? '+' : '') + totLive.toFixed(3) + ' $';
+    liveHeaderEl.style.color = totLive >= 0 ? 'var(--success)' : 'var(--danger)';
 
-    // جلب الأرشيف للقناص
     fetch('/api/history?bot_name=SNIPER').then(res=>res.json()).then(hList=>{
       let clH = '';
       let dayPnl = 0;
