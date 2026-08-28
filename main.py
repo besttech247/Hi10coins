@@ -42,7 +42,6 @@ shared_state = {
     "recent_logs": [],
     "open_limit_orders": [],
     "sniper_positions": [],
-    "smart_scanner_cache": [],
     "start_timestamp": START_TIME,
     "current_day": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
     "bots": {}
@@ -247,21 +246,36 @@ def calculate_ewo(candles):
         vals.append(sma5 - sma35)
     return vals[0], vals[1], vals[2]
 
-def evaluate_coin_signals(ticker, tf="5m"):
+def evaluate_coin_signals(ticker, tf="5m", vol_th=2.0, rsi_th=38.0):
     sym = ticker["symbol"]
     candles = fetch_klines(sym, interval=tf, limit=38)
     if len(candles) < 25: return None
 
-    # 1. فحص Volume Surge (السيولة)
+    candles_1d = fetch_klines(sym, interval="1d", limit=2)
+    candles_1h = fetch_klines(sym, interval="60m", limit=2)
+
+    cur_price = candles[-1]['close']
+    
+    change_d_pct = 0.0
+    if len(candles_1d) >= 2 and candles_1d[-2]['close'] > 0:
+        prev_d_close = candles_1d[-2]['close']
+        change_d_pct = ((cur_price - prev_d_close) / prev_d_close) * 100.0
+
+    change_1h_pct = 0.0
+    if len(candles_1h) >= 2 and candles_1h[-2]['close'] > 0:
+        prev_1h_close = candles_1h[-2]['close']
+        change_1h_pct = ((cur_price - prev_1h_close) / prev_1h_close) * 100.0
+
+    # 1. فحص Volume Surge
     vols = [c['vol'] for c in candles[:-1]]
     avg_vol = sum(vols[-20:]) / 20.0 if len(vols) >= 20 else 1.0
     cur_vol = candles[-1]['vol']
     vol_mult = (cur_vol / avg_vol) if avg_vol > 0 else 0.0
-    sig_vol = (vol_mult >= 2.0) and (candles[-1]['close'] >= candles[-1]['open'])
+    sig_vol = (vol_mult >= vol_th) and (candles[-1]['close'] >= candles[-1]['open'])
 
     # 2. فحص RSI Oversold Bounce
     rsi_val = calculate_rsi(candles, 14)
-    sig_rsi = (rsi_val <= 38.0) and (candles[-1]['close'] > candles[-2]['close'])
+    sig_rsi = (rsi_val <= rsi_th) and (candles[-1]['close'] > candles[-2]['close'])
 
     # 3. فحص EWO Momentum
     e3, e2, e1 = calculate_ewo(candles)
@@ -274,8 +288,9 @@ def evaluate_coin_signals(ticker, tf="5m"):
 
     return {
         "symbol": sym,
-        "price": candles[-1]['close'],
-        "change_pct": ticker.get("priceChangePercent", 0.0),
+        "price": cur_price,
+        "change_d_pct": round(change_d_pct, 2),
+        "change_1h_pct": round(change_1h_pct, 2),
         "quote_vol": float(ticker.get("quoteVolume", 0.0)),
         "sig_vol": sig_vol,
         "vol_mult": round(vol_mult, 1),
@@ -488,14 +503,12 @@ def trading_engine_loop():
                     if half_qty > 0:
                         ok, res = place_order(sym, "SELL", qty=half_qty, order_type="MARKET")
                         if ok:
-                            # حساب القيمة الحقيقية المستلمة بالدولار
                             usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
                             real_exit = (usd_rec / half_qty) if (usd_rec > 0 and half_qty > 0) else bid
                             gross_pnl = (real_exit - entry) * half_qty
                             fee_usd = (entry * half_qty * 0.001) + (real_exit * half_qty * 0.001)
                             net_pnl = gross_pnl - fee_usd
 
-                            # أرشفة ربح النصف الأول فوراً
                             database.archive_closed_trade({
                                 "id": f"{sp['id']}_tp1", "bot_name": prof_name, "symbol": sym,
                                 "entry_price": entry, "exit_price": real_exit,
@@ -819,13 +832,16 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps(profiles, ensure_ascii=False).encode('utf-8'))
 
-        # مسار سكانر الإشارات الفنية الاستباقية مع المعالجة المتوازية
+        # سكانر الإشارات الفنية الاستباقية مع المعالجة المتوازية
         elif self.path.startswith('/api/smart_scanner'):
             try:
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)
                 tf = params.get("tf", ["5m"])[0]
                 filter_mode = params.get("filter", ["all"])[0]
+                limit = int(params.get("limit", [4])[0])
+                vol_th = float(params.get("vol_mult", [2.0])[0])
+                rsi_th = float(params.get("rsi_th", [38.0])[0])
 
                 url = f"{BASE_URL}/api/v3/ticker/24hr"
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -836,11 +852,11 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                         if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= 40000
                     ]
                     usdt_tickers.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-                    top_candidates = usdt_tickers[:30]
+                    top_candidates = usdt_tickers[:35]
 
                 matched_signals = []
                 with ThreadPoolExecutor(max_workers=8) as executor:
-                    results = list(executor.map(lambda t: evaluate_coin_signals(t, tf=tf), top_candidates))
+                    results = list(executor.map(lambda t: evaluate_coin_signals(t, tf=tf, vol_th=vol_th, rsi_th=rsi_th), top_candidates))
                     for r in results:
                         if r:
                             if filter_mode == "triple" and r["signals_count"] < 3: continue
@@ -849,11 +865,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                             if filter_mode == "ewo" and not r["sig_ewo"]: continue
                             matched_signals.append(r)
 
-                # الترتيب الذكي: أولوية لـ 3 إشارات ثم 2 ثم 1
-                matched_signals.sort(key=lambda x: (x["signals_count"], float(x["change_pct"])), reverse=True)
+                matched_signals.sort(key=lambda x: (x["signals_count"], float(x["change_d_pct"])), reverse=True)
                 
                 self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
-                self.wfile.write(json.dumps(matched_signals[:16], ensure_ascii=False).encode('utf-8'))
+                self.wfile.write(json.dumps(matched_signals[:limit], ensure_ascii=False).encode('utf-8'))
             except Exception:
                 self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
                 self.wfile.write(b"[]")
