@@ -21,6 +21,7 @@ PORT = int(os.environ.get("PORT", 8080))
 database.init_db()
 
 BASE_URL = "https://api.mexc.com"
+FUTURES_URL = "https://contract.mexc.com"
 ACTIVE_SESSIONS = set()
 ssl_ctx = ssl._create_unverified_context()
 START_TIME = time.time()
@@ -217,6 +218,37 @@ def fetch_klines(symbol, interval="15m", limit=45):
     except Exception:
         return []
 
+def fetch_futures_klines(symbol, interval="Min5"):
+    try:
+        contract_sym = symbol.replace("USDT", "_USDT") if not symbol.endswith("_USDT") else symbol
+        url = f"{FUTURES_URL}/api/v1/contract/kline/{contract_sym}?interval={interval}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=6) as res:
+            res_data = json.loads(res.read().decode('utf-8'))
+            if res_data.get("success") and "data" in res_data:
+                d = res_data["data"]
+                times = d.get("time", [])
+                opens = d.get("open", [])
+                highs = d.get("high", [])
+                lows = d.get("low", [])
+                closes = d.get("close", [])
+                vols = d.get("vol", [])
+                
+                candles = []
+                for i in range(len(times)):
+                    candles.append({
+                        'time': int(times[i]),
+                        'open': float(opens[i]),
+                        'high': float(highs[i]),
+                        'low': float(lows[i]),
+                        'close': float(closes[i]),
+                        'vol': float(vols[i])
+                    })
+                return candles
+    except Exception:
+        pass
+    return []
+
 def calculate_rsi(candles, period=14):
     if len(candles) < period + 1: return 50.0
     closes = [c['close'] for c in candles]
@@ -246,13 +278,22 @@ def calculate_ewo(candles):
         vals.append(sma5 - sma35)
     return vals[0], vals[1], vals[2]
 
-def evaluate_coin_signals(ticker, tf="5m", vol_th=2.0, rsi_th=38.0):
-    sym = ticker["symbol"]
-    candles = fetch_klines(sym, interval=tf, limit=38)
-    if len(candles) < 25: return None
+def evaluate_coin_signals(ticker, source="FUTURES", tf="5m", vol_th=2.0, rsi_th=38.0):
+    raw_sym = ticker["symbol"]
+    spot_sym = raw_sym.replace("_", "")
+    
+    if source == "FUTURES":
+        fut_tf = "Min1" if tf == "1m" else ("Min5" if tf == "5m" else ("Min15" if tf == "15m" else "Min60"))
+        candles = fetch_futures_klines(raw_sym, interval=fut_tf)
+        if not candles or len(candles) < 25:
+            candles = fetch_klines(spot_sym, interval=tf, limit=38)
+    else:
+        candles = fetch_klines(spot_sym, interval=tf, limit=38)
 
-    candles_1d = fetch_klines(sym, interval="1d", limit=2)
-    candles_1h = fetch_klines(sym, interval="60m", limit=2)
+    if not candles or len(candles) < 25: return None
+
+    candles_1d = fetch_klines(spot_sym, interval="1d", limit=2)
+    candles_1h = fetch_klines(spot_sym, interval="60m", limit=2)
 
     cur_price = candles[-1]['close']
     
@@ -266,18 +307,15 @@ def evaluate_coin_signals(ticker, tf="5m", vol_th=2.0, rsi_th=38.0):
         prev_1h_close = candles_1h[-2]['close']
         change_1h_pct = ((cur_price - prev_1h_close) / prev_1h_close) * 100.0
 
-    # 1. فحص Volume Surge
     vols = [c['vol'] for c in candles[:-1]]
     avg_vol = sum(vols[-20:]) / 20.0 if len(vols) >= 20 else 1.0
     cur_vol = candles[-1]['vol']
     vol_mult = (cur_vol / avg_vol) if avg_vol > 0 else 0.0
     sig_vol = (vol_mult >= vol_th) and (candles[-1]['close'] >= candles[-1]['open'])
 
-    # 2. فحص RSI Oversold Bounce
     rsi_val = calculate_rsi(candles, 14)
     sig_rsi = (rsi_val <= rsi_th) and (candles[-1]['close'] > candles[-2]['close'])
 
-    # 3. فحص EWO Momentum
     e3, e2, e1 = calculate_ewo(candles)
     sig_ewo = False
     if e1 is not None and e2 is not None:
@@ -287,11 +325,10 @@ def evaluate_coin_signals(ticker, tf="5m", vol_th=2.0, rsi_th=38.0):
     if signals_count == 0: return None
 
     return {
-        "symbol": sym,
+        "symbol": spot_sym,
         "price": cur_price,
         "change_d_pct": round(change_d_pct, 2),
         "change_1h_pct": round(change_1h_pct, 2),
-        "quote_vol": float(ticker.get("quoteVolume", 0.0)),
         "sig_vol": sig_vol,
         "vol_mult": round(vol_mult, 1),
         "sig_rsi": sig_rsi,
@@ -473,7 +510,7 @@ def trading_engine_loop():
 
             refresh_wallet_and_prices()
 
-            # 🎯 متابعة صفقات القناص المستقلة مع حساب الـ Real PnL الفعلي
+            # متابعة صفقات القناص المستقلة وحساب الأرباح الفعلية
             still_snipers = []
             for sp in shared_state.get("sniper_positions", []):
                 sym = sp["symbol"]
@@ -497,7 +534,6 @@ def trading_engine_loop():
                 tp2_price = entry * (1.0 + sp.get("tp2_pct", 0.030))
                 sl_price = entry * (1.0 - sp.get("sl_pct", 0.010))
 
-                # تحقيق الهدف الأول TP1: بيع 50% وتأمين الباقي على نقطة الدخول (Break-even)
                 if not sp.get("tp1_hit") and (highest >= tp1_price):
                     half_qty = float(format_quantity(sym, sp["qty"] * 0.5))
                     if half_qty > 0:
@@ -832,31 +868,52 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps(profiles, ensure_ascii=False).encode('utf-8'))
 
-        # سكانر الإشارات الفنية الاستباقية مع المعالجة المتوازية
+        # مسار سكانر الإشارات الفنية الاستباقية مع دعم الفيوتشر والسبوت
         elif self.path.startswith('/api/smart_scanner'):
             try:
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)
+                source = params.get("source", ["FUTURES"])[0]
                 tf = params.get("tf", ["5m"])[0]
                 filter_mode = params.get("filter", ["all"])[0]
                 limit = int(params.get("limit", [4])[0])
                 vol_th = float(params.get("vol_mult", [2.0])[0])
                 rsi_th = float(params.get("rsi_th", [38.0])[0])
 
-                url = f"{BASE_URL}/api/v3/ticker/24hr"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, context=ssl_ctx, timeout=6) as res:
-                    tickers = json.loads(res.read().decode('utf-8'))
-                    usdt_tickers = [
-                        t for t in tickers 
-                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= 40000
-                    ]
-                    usdt_tickers.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-                    top_candidates = usdt_tickers[:35]
+                top_candidates = []
+                if source == "FUTURES":
+                    try:
+                        fut_url = f"{FUTURES_URL}/api/v1/contract/ticker"
+                        req_f = urllib.request.Request(fut_url, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req_f, context=ssl_ctx, timeout=6) as res:
+                            f_data = json.loads(res.read().decode('utf-8'))
+                            if f_data.get("success") and "data" in f_data:
+                                f_list = [
+                                    {"symbol": t.get("symbol"), "quoteVolume": float(t.get("amount24", 0))}
+                                    for t in f_data["data"]
+                                    if t.get("symbol", "").endswith("_USDT") and float(t.get("amount24", 0)) >= 50000
+                                ]
+                                f_list.sort(key=lambda x: x["quoteVolume"], reverse=True)
+                                top_candidates = f_list[:35]
+                    except Exception:
+                        top_candidates = []
+
+                if not top_candidates:
+                    url = f"{BASE_URL}/api/v3/ticker/24hr"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, context=ssl_ctx, timeout=6) as res:
+                        tickers = json.loads(res.read().decode('utf-8'))
+                        usdt_tickers = [
+                            {"symbol": t.get("symbol"), "quoteVolume": float(t.get("quoteVolume", 0))}
+                            for t in tickers 
+                            if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= 40000
+                        ]
+                        usdt_tickers.sort(key=lambda x: x["quoteVolume"], reverse=True)
+                        top_candidates = usdt_tickers[:35]
 
                 matched_signals = []
                 with ThreadPoolExecutor(max_workers=8) as executor:
-                    results = list(executor.map(lambda t: evaluate_coin_signals(t, tf=tf, vol_th=vol_th, rsi_th=rsi_th), top_candidates))
+                    results = list(executor.map(lambda t: evaluate_coin_signals(t, source=source, tf=tf, vol_th=vol_th, rsi_th=rsi_th), top_candidates))
                     for r in results:
                         if r:
                             if filter_mode == "triple" and r["signals_count"] < 3: continue
