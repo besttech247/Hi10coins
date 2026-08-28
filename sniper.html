@@ -15,16 +15,38 @@ input,select{background:#090d16;border:1px solid var(--border);color:#fff;paddin
 details{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}
 summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font-size:12px}
 .form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;padding:8px}
-.gainers-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:6px;margin-top:6px}
-.gainer-card{background:#151e30;border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;justify-content:space-between;cursor:pointer;transition:all 0.2s ease}
-.gainer-card:active{transform:scale(0.97);background:#1a233a}
-.gainer-card.mode-fut{border-color:#8b5cf666}
-.gainer-card.mode-spot{border-color:#10b98166}
-.gainer-card.triple-confluence{box-shadow:0 0 8px #10b98144}
-.badge-tag{padding:2px 4px;border-radius:4px;font-size:9px;font-weight:bold;display:inline-block}
+.gainers-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;margin-top:6px}
+
+/* بطاقة موحدة المقاس مع إطار سميك وتأثير وميض التحديث */
+.gainer-card{
+  background:#151e30;
+  border:2px solid var(--border);
+  border-radius:8px;
+  padding:8px;
+  min-height:92px;
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+  cursor:pointer;
+  transition:transform 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.gainer-card:active{transform:scale(0.96);background:#1a233a}
+.gainer-card.mode-fut{border-color:#8b5cf6;box-shadow:0 0 6px #8b5cf633}
+.gainer-card.mode-spot{border-color:#10b981;box-shadow:0 0 6px #10b98133}
+.gainer-card.triple-confluence{border-color:#eab308 !important;box-shadow:0 0 10px #eab30855 !important}
+
+/* حركة وميض التحديث */
+@keyframes cardFlash {
+  0%{opacity:0.45;transform:scale(0.98)}
+  100%{opacity:1;transform:scale(1)}
+}
+.card-flash{animation:cardFlash 0.35s ease-out}
+
+.badge-tag{padding:1px 4px;border-radius:3px;font-size:8.5px;font-weight:bold;display:inline-block}
 .tag-vol{background:#eab30822;color:#facc15}
 .tag-rsi{background:#06b6d422;color:#22d3ee}
 .tag-ewo{background:#ec489922;color:#f472b6}
+
 .inner-tabs{display:flex;gap:4px;margin:6px 0;background:#090d16;padding:4px;border-radius:6px}
 .inner-tab{flex:1;padding:6px;background:transparent;border:none;color:var(--sub);border-radius:4px;font-size:11px;font-weight:bold;cursor:pointer}
 .inner-tab.active{background:#1e293b;color:#fff}
@@ -32,10 +54,12 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
 .inner-pane.active{display:block}
 .pct-btn{background:#151e30;border:1px solid var(--border);color:var(--sub);padding:4px 8px;border-radius:5px;cursor:pointer;font-size:10.5px;font-weight:bold}
 .pct-btn:hover{background:#1e293b;color:#fff}
+
 .scanner-toggle-btn{padding:3px 8px;border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--sub);font-size:10px;font-weight:bold;cursor:pointer;transition:all 0.2s}
 .scanner-toggle-btn.fut-active{background:#8b5cf6;color:#fff;border-color:#8b5cf6;box-shadow:0 0 8px #8b5cf655}
 .scanner-toggle-btn.spot-active{background:#10b981;color:#fff;border-color:#10b981;box-shadow:0 0 8px #10b98155}
 .scanner-toggle-btn.all-active{background:#0284c7;color:#fff;border-color:#0284c7;box-shadow:0 0 8px #0284c755}
+
 table{width:100%;border-collapse:collapse;text-align:right}
 th,td{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}
 th{color:var(--sub)}
@@ -71,7 +95,7 @@ th{color:var(--sub)}
     <button class="btn" style="background:var(--primary);color:#fff" onclick="searchAndLoadCoin()">تحميل 🎯</button>
   </div>
 
-  <!-- 1. رادار العملات (أزرار: فيوتشر / سبوت / الكل) -->
+  <!-- 1. رادار العملات (افتراضي 8 بطاقات) -->
   <details open class="card" id="radar-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <div style="display:flex;align-items:center;gap:6px">
@@ -99,8 +123,8 @@ th{color:var(--sub)}
         <div>
           <label style="font-size:9.5px;color:var(--sub)">عدد العملات المعروضة</label>
           <select id="rad-limit" onchange="fetchSmartScanner()">
-            <option value="4" selected>4 عملات</option>
-            <option value="8">8 عملات</option>
+            <option value="4">4 عملات</option>
+            <option value="8" selected>8 عملات (افتراضي)</option>
             <option value="12">12 عملة</option>
             <option value="16">16 عملة</option>
           </select>
@@ -171,7 +195,6 @@ th{color:var(--sub)}
         <label style="font-size:10px;color:var(--sub)">المبلغ ($)</label>
         <input type="number" id="snp-size" value="10">
       </div>
-      <!-- حقول متقدمة تظهر فقط بالضغط على الترس -->
       <div class="advanced-param">
         <label style="font-size:10px;color:var(--sub)">نوع الأمر</label>
         <select id="snp-type">
@@ -406,12 +429,12 @@ function updatePanelPrice(){
   }
 }
 
-// جلب نتائج السكانر
+// جلب نتائج السكانر وعرض البطاقات المقاسة بدقة مع وميض التحديث
 async function fetchSmartScanner(){
   try{
     const tf = document.getElementById('rad-tf').value;
     const filter = document.getElementById('rad-filter').value;
-    const limit = document.getElementById('rad-limit').value;
+    const limit = document.getElementById('rad-limit').value || 8;
     const volMult = document.getElementById('rad-vol-mult').value;
     const rsiTh = document.getElementById('rad-rsi-th').value;
 
@@ -423,42 +446,40 @@ async function fetchSmartScanner(){
       results.forEach(g => {
         const isTriple = g.signals_count === 3;
         const isFutCoin = g.source === 'FUTURES';
-        const cardCls = `gainer-card ${isFutCoin?'mode-fut':'mode-spot'} ${isTriple?'triple-confluence':''}`;
+        const cardCls = `gainer-card card-flash ${isFutCoin?'mode-fut':'mode-spot'} ${isTriple?'triple-confluence':''}`;
         
         const dChg = parseFloat(g.change_d_pct || 0);
         const hChg = parseFloat(g.change_1h_pct || 0);
         const dColor = dChg >= 0 ? 'var(--success)' : 'var(--danger)';
         const hColor = hChg >= 0 ? 'var(--success)' : 'var(--danger)';
 
-        const srcBadge = isFutCoin ? 
-          '<span class="badge-tag" style="background:#8b5cf633;color:#c084fc">🔮 فيوتشر</span>' : 
-          '<span class="badge-tag" style="background:#10b98133;color:#34d399">🟢 سبوت</span>';
+        const srcIcon = isFutCoin ? '🔮' : '🟢';
 
         let badges = '';
-        if(g.sig_vol) badges += `<span class="badge-tag tag-vol">⚡ سيولة ${g.vol_mult}x</span> `;
-        if(g.sig_rsi) badges += `<span class="badge-tag tag-rsi">🌊 RSI (${g.rsi_val})</span> `;
-        if(g.sig_ewo) badges += `<span class="badge-tag tag-ewo">🚀 EWO تقاطع</span> `;
+        if(g.sig_vol) badges += `<span class="badge-tag tag-vol">⚡ ${g.vol_mult}x</span> `;
+        if(g.sig_rsi) badges += `<span class="badge-tag tag-rsi">🌊 ${g.rsi_val}</span> `;
+        if(g.sig_ewo) badges += `<span class="badge-tag tag-ewo">🚀 EWO</span> `;
 
         h += `
         <div class="${cardCls}" onclick="selectAndLoadUnified('${g.symbol}')">
           <div>
-            <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
               <div>
                 <strong style="color:#f3f4f6;font-size:12px">${g.symbol.replace('USDT','')}</strong>
-                <span style="margin-right:3px">${srcBadge}</span>
+                <span style="font-size:10px;margin-right:2px">${srcIcon}</span>
               </div>
-              <div style="text-align:left">
-                <span style="color:${dColor};font-weight:bold;font-size:10px">يومي: ${dChg>=0?'+':''}${dChg.toFixed(2)}%</span><br>
-                <span style="color:${hColor};font-size:9.5px">ساعة: ${hChg>=0?'+':''}${hChg.toFixed(2)}%</span>
+              <div style="text-align:left;line-height:1.2">
+                <span style="color:${dColor};font-weight:bold;font-size:10px">D: ${dChg>=0?'+':''}${dChg.toFixed(1)}%</span><br>
+                <span style="color:${hColor};font-size:9px">H: ${hChg>=0?'+':''}${hChg.toFixed(1)}%</span>
               </div>
             </div>
-            <div style="font-size:10.5px;color:var(--sub);margin:2px 0">${g.price}$</div>
-            <div style="margin-top:4px;line-height:1.5">${badges}</div>
+            <div style="font-size:10px;color:var(--sub);margin:2px 0">${g.price}$</div>
           </div>
+          <div style="margin-top:4px;line-height:1.4">${badges}</div>
         </div>`;
       });
     } else {
-      h = `<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">لا توجد إشارات مطابقة حالياً</div>`;
+      h = `<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px;font-size:11px">لا توجد إشارات مطابقة حالياً</div>`;
     }
     document.getElementById('gainers-container').innerHTML = h;
   }catch(e){}
