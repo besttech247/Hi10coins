@@ -41,6 +41,7 @@ th{color:var(--sub)}
 </style>
 </head>
 <body>
+  <!-- الهيدر الموحد -->
   <div class="header-box">
     <div>
       <div style="display:flex;align-items:center;gap:6px">
@@ -58,11 +59,13 @@ th{color:var(--sub)}
     </div>
   </div>
 
+  <!-- البحث السريع -->
   <div class="card" style="display:flex;gap:6px;align-items:center">
-    <input type="text" id="coin-search-input" placeholder="🔍 ابحث عن أي عملة (مثال: PEPE, SUI, DOGE)..." style="flex:1" onkeypress="if(event.key==='Enter') searchAndLoadCoin()">
+    <input type="text" id="coin-search-input" placeholder="🔍 ابحث عن أي عملة (مثال: PEPE, SUI, DOGE, PAXG)..." style="flex:1" onkeypress="if(event.key==='Enter') searchAndLoadCoin()">
     <button class="btn" style="background:var(--primary);color:#fff" onclick="searchAndLoadCoin()">تحميل 🎯</button>
   </div>
 
+  <!-- 1. رادار العملات المتفجرة -->
   <details open class="card" id="radar-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <span style="color:#38bdf8">📡 رادار الإشارات الذكية (انقر على البطاقة لتحميلها)</span>
@@ -125,13 +128,15 @@ th{color:var(--sub)}
     </div>
   </details>
 
+  <!-- 2. الشارت الفني المباشر مع مؤشرات EWO (AO) و RSI الحقيقية بارتفاع 460px -->
   <details open class="card">
     <summary style="color:#a78bfa">📈 الشارت المباشر ومؤشر EWO & RSI (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
-    <div style="height:350px;width:100%;margin-top:6px" id="tv_chart_container">
+    <div style="height:460px;width:100%;margin-top:6px" id="tv_chart_container">
       <iframe id="tv-iframe" src="" style="width:100%;height:100%;border:none"></iframe>
     </div>
   </details>
 
+  <!-- 3. لوحة القناص: واجهة نظيفة + أزرار مبالغ سريعة + إخفاء الباقي خلف الترس -->
   <details open class="card hide-params" id="exec-panel-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <span style="color:#10b981">⚡ لوحة القنص والتنفيذ السريع</span>
@@ -152,6 +157,7 @@ th{color:var(--sub)}
         <label style="font-size:10px;color:var(--sub)">المبلغ ($)</label>
         <input type="number" id="snp-size" value="10">
       </div>
+      <!-- حقول متقدمة تظهر فقط بالضغط على الترس -->
       <div class="advanced-param">
         <label style="font-size:10px;color:var(--sub)">نوع الأمر</label>
         <select id="snp-type">
@@ -180,6 +186,7 @@ th{color:var(--sub)}
       </div>
     </div>
 
+    <!-- أزرار المبالغ السريعة لاختيار المبلغ بنقرة واحدة -->
     <div style="display:flex;gap:4px;padding:0 8px 8px 8px;align-items:center">
       <span style="font-size:10px;color:var(--sub)">مبالغ سريعة:</span>
       <button class="pct-btn" onclick="setQuickSize(10)">10$</button>
@@ -194,6 +201,7 @@ th{color:var(--sub)}
     </div>
   </details>
 
+  <!-- 4. صفقات وأوامر القناص -->
   <details open class="card" id="sniper-trades-box">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <div style="display:flex;align-items:center;gap:6px">
@@ -358,6 +366,7 @@ async function loadBal(){
 }
 loadBal(); setInterval(loadBal, 3000);
 
+// سكانر الفرص المتفجرة
 async function fetchSmartScanner(){
   try{
     const tf = document.getElementById('rad-tf').value;
@@ -407,22 +416,32 @@ async function fetchSmartScanner(){
 }
 fetchSmartScanner(); setInterval(fetchSmartScanner, 15000);
 
-// تحديث الشارت مع مؤشرات EWO (AO) و RSI
+// تنظيف وتوحيد رمز العملة وحل مشكلة الأقواس مثل GOLD(PAXG)USDT -> PAXGUSDT
+function cleanSymbolForTradingView(sym) {
+  let s = sym.toUpperCase().trim();
+  if (s.includes('PAXG')) return 'PAXGUSDT';
+  s = s.replace(/[\(\)\s]/g, '');
+  if (!s.endsWith('USDT') && !s.endsWith('USDC')) {
+    s += 'USDT';
+  }
+  return s;
+}
+
+// تحديث الشارت بارتفاع 460px مع مؤشرات Awesome Oscillator (EWO) و RSI
 function selectAndLoadUnified(sym){
-  const fullSym = sym.endsWith('USDT') ? sym : sym + 'USDT';
-  document.getElementById('snp-sym').value = fullSym;
-  document.getElementById('chart-symbol-name').innerText = 'MEXC:' + fullSym;
+  const cleanSym = cleanSymbolForTradingView(sym);
+  document.getElementById('snp-sym').value = cleanSym;
+  document.getElementById('chart-symbol-name').innerText = 'MEXC:' + cleanSym;
   
-  // استخدام ترميز دقيق لإظهار مؤشر Awesome Oscillator (EWO) ومؤشر RSI معاً
   const studiesParam = encodeURIComponent(JSON.stringify([
     { id: "AwesomeOscillator@tv-basicstudies" },
     { id: "RSI@tv-basicstudies" }
   ]));
   
-  document.getElementById('tv-iframe').src = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${fullSym}&interval=5&theme=dark&style=1&locale=ar_AE&studies=${studiesParam}&enablepublishing=false&hideideas=true`;
+  document.getElementById('tv-iframe').src = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${cleanSym}&interval=5&theme=dark&style=1&locale=ar_AE&studies=${studiesParam}&enablepublishing=false&hideideas=true`;
 }
 
-// تحميل افتراضي لعملة SOL عند فتح الصفحة
+// تحميل افتراضي عند البداية
 document.addEventListener('DOMContentLoaded', () => {
   selectAndLoadUnified('SOLUSDT');
 });
@@ -430,8 +449,7 @@ document.addEventListener('DOMContentLoaded', () => {
 function searchAndLoadCoin(){
   const raw = document.getElementById('coin-search-input').value.trim().toUpperCase();
   if(!raw) return;
-  const target = raw.endsWith('USDT') ? raw : raw + 'USDT';
-  selectAndLoadUnified(target);
+  selectAndLoadUnified(raw);
   document.getElementById('coin-search-input').value = '';
 }
 
