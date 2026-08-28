@@ -28,12 +28,14 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
 .inner-tab.active{background:#1e293b;color:#fff}
 .inner-pane{display:none}
 .inner-pane.active{display:block}
+.pct-btn{background:#151e30;border:1px solid var(--border);color:var(--sub);padding:4px 8px;border-radius:5px;cursor:pointer;font-size:10.5px;font-weight:bold}
+.pct-btn:hover{background:#1e293b;color:#fff}
 table{width:100%;border-collapse:collapse;text-align:right}
 th,td{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}
 th{color:var(--sub)}
 .manage-ctrl{display:none}
 .manage-mode .manage-ctrl{display:table-cell}
-.hide-params .advanced-param{display:none}
+.hide-params .advanced-param{display:none !important}
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:#00000088;display:none;align-items:center;justify-content:center;z-index:99}
 .modal{background:#111827;border:1px solid var(--border);padding:14px;border-radius:10px;width:290px}
 </style>
@@ -45,7 +47,7 @@ th{color:var(--sub)}
         <strong>🎯 رادار وقناص الفرص المتفجرة</strong>
         <a href="/" style="color:#60a5fa;font-size:11px;text-decoration:none;background:#1e293b;padding:2px 6px;border-radius:4px">🏠 الرئيسية ↗</a>
       </div>
-      <div style="font-size:10px;color:var(--sub)">ربح القناص اليوم: <strong id="snp-daily-pnl" style="color:#10b981">+0.00$</strong></div>
+      <div style="font-size:10px;color:var(--sub)">ربح القناص الصافي اليوم: <strong id="snp-daily-pnl" style="color:#10b981">+0.00$</strong></div>
     </div>
     <div style="display:flex;align-items:center;gap:6px">
       <div class="wallet-bar">
@@ -61,7 +63,6 @@ th{color:var(--sub)}
     <button class="btn" style="background:var(--primary);color:#fff" onclick="searchAndLoadCoin()">تحميل 🎯</button>
   </div>
 
-  <!-- 1. رادار الإشارات الفنية (البطاقة هي الزر بالكامل) -->
   <details open class="card" id="radar-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <span style="color:#38bdf8">📡 رادار الإشارات الذكية (انقر على البطاقة لتحميلها)</span>
@@ -124,19 +125,17 @@ th{color:var(--sub)}
     </div>
   </details>
 
-  <!-- 2. الشارت الفني مع EWO (Awesome Oscillator) و RSI -->
   <details open class="card">
-    <summary style="color:#a78bfa">📈 الشارت المباشر ومؤشر EWO / AO (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
-    <div style="height:320px;width:100%;margin-top:6px" id="tv_chart_container">
-      <iframe id="tv-iframe" src="https://s.tradingview.com/widgetembed/?symbol=MEXC%3ASOLUSDT&interval=5&theme=dark&style=1&locale=ar_AE&studies=AwesomeOscillator%40tv-basicstudies%2CRSI%40tv-basicstudies&enablepublishing=false&hideideas=true" style="width:100%;height:100%;border:none"></iframe>
+    <summary style="color:#a78bfa">📈 الشارت المباشر ومؤشر EWO & RSI (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
+    <div style="height:350px;width:100%;margin-top:6px" id="tv_chart_container">
+      <iframe id="tv-iframe" src="" style="width:100%;height:100%;border:none"></iframe>
     </div>
   </details>
 
-  <!-- 3. لوحة القناص المزدوج مع إخفاء الإعدادات وزر الحفظ خلف الترس -->
   <details open class="card hide-params" id="exec-panel-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
-      <span style="color:#10b981">⚡ لوحة القنص والتنفيذ</span>
-      <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleExecParams(); event.stopPropagation();" title="إظهار/إخفاء إعدادات الأهداف ونوع الأمر">⚙️</button>
+      <span style="color:#10b981">⚡ لوحة القنص والتنفيذ السريع</span>
+      <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleExecParams(); event.stopPropagation();" title="تعديل الأهداف والوقف ونوع الأمر">⚙️</button>
     </summary>
     
     <div class="inner-tabs" style="margin-top:4px">
@@ -180,12 +179,21 @@ th{color:var(--sub)}
         <button class="btn" style="background:#3b82f6;color:#fff;width:100%" onclick="saveCurrentProfileConfig()">💾 حفظ الإعداد</button>
       </div>
     </div>
+
+    <div style="display:flex;gap:4px;padding:0 8px 8px 8px;align-items:center">
+      <span style="font-size:10px;color:var(--sub)">مبالغ سريعة:</span>
+      <button class="pct-btn" onclick="setQuickSize(10)">10$</button>
+      <button class="pct-btn" onclick="setQuickSize(25)">25$</button>
+      <button class="pct-btn" onclick="setQuickSize(50)">50$</button>
+      <button class="pct-btn" onclick="setQuickSize(100)">100$</button>
+      <button class="pct-btn" onclick="setQuickSize(200)">200$</button>
+    </div>
+
     <div style="padding:0 8px 8px 8px">
       <button class="btn" id="main-snipe-btn" style="background:#10b981;color:#fff;width:100%;padding:10px;font-size:13px" onclick="executeSnipe()">🎯 إطلاق قنص 1 (سكالبينج سريع)</button>
     </div>
   </details>
 
-  <!-- 4. صفقات وأوامر القناص -->
   <details open class="card" id="sniper-trades-box">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <div style="display:flex;align-items:center;gap:6px">
@@ -262,6 +270,10 @@ th{color:var(--sub)}
 let freeUsdt = 0;
 let currentSniperProfile = 'SNIPER_1';
 let sniperProfiles = {};
+
+function setQuickSize(val){
+  document.getElementById('snp-size').value = val;
+}
 
 function switchInnerTab(paneId, btn){
   document.querySelectorAll('.inner-pane').forEach(p => p.classList.remove('active'));
@@ -346,7 +358,6 @@ async function loadBal(){
 }
 loadBal(); setInterval(loadBal, 3000);
 
-// جلب نتائج السكانر وعرض البطاقات القابلة للنقر
 async function fetchSmartScanner(){
   try{
     const tf = document.getElementById('rad-tf').value;
@@ -396,12 +407,25 @@ async function fetchSmartScanner(){
 }
 fetchSmartScanner(); setInterval(fetchSmartScanner, 15000);
 
+// تحديث الشارت مع مؤشرات EWO (AO) و RSI
 function selectAndLoadUnified(sym){
   const fullSym = sym.endsWith('USDT') ? sym : sym + 'USDT';
   document.getElementById('snp-sym').value = fullSym;
   document.getElementById('chart-symbol-name').innerText = 'MEXC:' + fullSym;
-  document.getElementById('tv-iframe').src = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${fullSym}&interval=5&theme=dark&style=1&locale=ar_AE&studies=AwesomeOscillator%40tv-basicstudies%2CRSI%40tv-basicstudies&enablepublishing=false&hideideas=true`;
+  
+  // استخدام ترميز دقيق لإظهار مؤشر Awesome Oscillator (EWO) ومؤشر RSI معاً
+  const studiesParam = encodeURIComponent(JSON.stringify([
+    { id: "AwesomeOscillator@tv-basicstudies" },
+    { id: "RSI@tv-basicstudies" }
+  ]));
+  
+  document.getElementById('tv-iframe').src = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${fullSym}&interval=5&theme=dark&style=1&locale=ar_AE&studies=${studiesParam}&enablepublishing=false&hideideas=true`;
 }
+
+// تحميل افتراضي لعملة SOL عند فتح الصفحة
+document.addEventListener('DOMContentLoaded', () => {
+  selectAndLoadUnified('SOLUSDT');
+});
 
 function searchAndLoadCoin(){
   const raw = document.getElementById('coin-search-input').value.trim().toUpperCase();
