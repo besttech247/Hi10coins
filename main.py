@@ -12,6 +12,7 @@ import hashlib
 import os
 import math
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from http import cookies
 from datetime import datetime, timezone
 import database
@@ -41,6 +42,7 @@ shared_state = {
     "recent_logs": [],
     "open_limit_orders": [],
     "sniper_positions": [],
+    "smart_scanner_cache": [],
     "start_timestamp": START_TIME,
     "current_day": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
     "bots": {}
@@ -209,9 +211,79 @@ def fetch_klines(symbol, interval="15m", limit=45):
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, context=ssl_ctx, timeout=6) as res:
             data = json.loads(res.read().decode('utf-8'))
-            return [{'time': int(r[0]), 'open': float(r[1]), 'high': float(r[2]), 'low': float(r[3]), 'close': float(r[4])} for r in data]
+            return [{
+                'time': int(r[0]), 'open': float(r[1]), 'high': float(r[2]),
+                'low': float(r[3]), 'close': float(r[4]), 'vol': float(r[5])
+            } for r in data]
     except Exception:
         return []
+
+def calculate_rsi(candles, period=14):
+    if len(candles) < period + 1: return 50.0
+    closes = [c['close'] for c in candles]
+    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0: return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+def calculate_ewo(candles):
+    if len(candles) < 38: return None, None, None
+    medians = [(c['high'] + c['low']) / 2.0 for c in candles]
+    vals = []
+    for offset in [3, 2, 1]:
+        sub = medians[:len(candles) - offset + 1]
+        sma5 = sum(sub[-5:]) / 5.0
+        sma35 = sum(sub[-35:]) / 35.0
+        vals.append(sma5 - sma35)
+    return vals[0], vals[1], vals[2]
+
+def evaluate_coin_signals(ticker, tf="5m"):
+    sym = ticker["symbol"]
+    candles = fetch_klines(sym, interval=tf, limit=38)
+    if len(candles) < 25: return None
+
+    # 1. فحص Volume Surge (السيولة)
+    vols = [c['vol'] for c in candles[:-1]]
+    avg_vol = sum(vols[-20:]) / 20.0 if len(vols) >= 20 else 1.0
+    cur_vol = candles[-1]['vol']
+    vol_mult = (cur_vol / avg_vol) if avg_vol > 0 else 0.0
+    sig_vol = (vol_mult >= 2.0) and (candles[-1]['close'] >= candles[-1]['open'])
+
+    # 2. فحص RSI Oversold Bounce
+    rsi_val = calculate_rsi(candles, 14)
+    sig_rsi = (rsi_val <= 38.0) and (candles[-1]['close'] > candles[-2]['close'])
+
+    # 3. فحص EWO Momentum
+    e3, e2, e1 = calculate_ewo(candles)
+    sig_ewo = False
+    if e1 is not None and e2 is not None:
+        sig_ewo = (e1 > e2) and ((e2 < 0 and e1 >= e2) or (e2 <= 0 and e1 > 0))
+
+    signals_count = sum([1 if sig_vol else 0, 1 if sig_rsi else 0, 1 if sig_ewo else 0])
+    if signals_count == 0: return None
+
+    return {
+        "symbol": sym,
+        "price": candles[-1]['close'],
+        "change_pct": ticker.get("priceChangePercent", 0.0),
+        "quote_vol": float(ticker.get("quoteVolume", 0.0)),
+        "sig_vol": sig_vol,
+        "vol_mult": round(vol_mult, 1),
+        "sig_rsi": sig_rsi,
+        "rsi_val": round(rsi_val, 1),
+        "sig_ewo": sig_ewo,
+        "signals_count": signals_count
+    }
 
 def get_asset_free_balance(asset_name):
     for a in shared_state.get("wallet_assets", []):
@@ -292,17 +364,6 @@ def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
 
     mexc_private_request("/api/v3/order", method="DELETE", params={"symbol": symbol, "orderId": order_id})
     return place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
-
-def calculate_ewo(candles):
-    if len(candles) < 38: return None, None, None
-    medians = [(c['high'] + c['low']) / 2.0 for c in candles]
-    vals = []
-    for offset in [3, 2, 1]:
-        sub = medians[:len(candles) - offset + 1]
-        sma5 = sum(sub[-5:]) / 5.0
-        sma35 = sum(sub[-35:]) / 35.0
-        vals.append(sma5 - sma35)
-    return vals[0], vals[1], vals[2]
 
 def refresh_wallet_and_prices():
     try:
@@ -397,7 +458,7 @@ def trading_engine_loop():
 
             refresh_wallet_and_prices()
 
-            # 🎯 متابعة صفقات القناص المستقلة مع الأهداف المتعددة (TP1 / TP2 / Trailing Stop)
+            # 🎯 متابعة صفقات القناص المستقلة مع حساب الـ Real PnL الفعلي
             still_snipers = []
             for sp in shared_state.get("sniper_positions", []):
                 sym = sp["symbol"]
@@ -410,15 +471,16 @@ def trading_engine_loop():
                 entry = sp["entry_price"]
                 highest = sp.get("highest_price", entry)
                 base_asset = sym.replace("USDT", "").replace("USDC", "")
+                prof_name = sp.get("sniper_profile", "SNIPER_1")
 
                 if bid > highest:
                     highest = bid
                     sp["highest_price"] = highest
                     database.update_sniper_trade(sp["id"], {"highest_price": highest})
 
-                tp1_price = entry * (1.0 + sp.get("tp1_pct", 0.02))
-                tp2_price = entry * (1.0 + sp.get("tp2_pct", 0.04))
-                sl_price = entry * (1.0 - sp.get("sl_pct", 0.015))
+                tp1_price = entry * (1.0 + sp.get("tp1_pct", 0.015))
+                tp2_price = entry * (1.0 + sp.get("tp2_pct", 0.030))
+                sl_price = entry * (1.0 - sp.get("sl_pct", 0.010))
 
                 # تحقيق الهدف الأول TP1: بيع 50% وتأمين الباقي على نقطة الدخول (Break-even)
                 if not sp.get("tp1_hit") and (highest >= tp1_price):
@@ -426,13 +488,29 @@ def trading_engine_loop():
                     if half_qty > 0:
                         ok, res = place_order(sym, "SELL", qty=half_qty, order_type="MARKET")
                         if ok:
+                            # حساب القيمة الحقيقية المستلمة بالدولار
+                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
+                            real_exit = (usd_rec / half_qty) if (usd_rec > 0 and half_qty > 0) else bid
+                            gross_pnl = (real_exit - entry) * half_qty
+                            fee_usd = (entry * half_qty * 0.001) + (real_exit * half_qty * 0.001)
+                            net_pnl = gross_pnl - fee_usd
+
+                            # أرشفة ربح النصف الأول فوراً
+                            database.archive_closed_trade({
+                                "id": f"{sp['id']}_tp1", "bot_name": prof_name, "symbol": sym,
+                                "entry_price": entry, "exit_price": real_exit,
+                                "qty": half_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "net_pnl": net_pnl, "reason": "🎯 TP1 (50% تأمين)",
+                                "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
+                            })
+
                             sp["tp1_hit"] = 1
                             sp["qty"] -= half_qty
                             database.update_sniper_trade(sp["id"], {"tp1_hit": 1, "qty": sp["qty"]})
-                            add_log(f"🎯 [Sniper] تحقيق هدف TP1 لـ {sym} | بيع 50% ({half_qty}) عند {bid}$ وتأمين الباقي على الدخول", "sells", "success")
+                            add_log(f"🎯 [{prof_name}] بيع 50% لـ {sym} عند {real_exit}$ | ربح: {net_pnl:+.3f}$ وتأمين الدخول", "sells", "success")
 
                 effective_sl = entry if sp.get("tp1_hit") else sl_price
-                cb_pct = sp.get("trailing_cb", 0.008)
+                cb_pct = sp.get("trailing_cb", 0.006)
                 trailing_sl = highest * (1.0 - cb_pct)
                 if sp.get("tp1_hit") and highest >= (entry * (1.0 + cb_pct)):
                     effective_sl = max(effective_sl, trailing_sl)
@@ -448,18 +526,21 @@ def trading_engine_loop():
                     if float(format_quantity(sym, sell_qty)) > 0:
                         ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
                         if ok:
-                            gross_pnl = (bid - entry) * sell_qty
-                            fee_usd = (entry * sell_qty * 0.001) + (bid * sell_qty * 0.001)
+                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
+                            real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
+                            gross_pnl = (real_exit - entry) * sell_qty
+                            fee_usd = (entry * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
                             net_pnl = gross_pnl - fee_usd
+
                             database.archive_closed_trade({
-                                "id": sp["id"], "bot_name": "SNIPER", "symbol": sym,
-                                "entry_price": entry, "exit_price": bid,
+                                "id": sp["id"], "bot_name": prof_name, "symbol": sym,
+                                "entry_price": entry, "exit_price": real_exit,
                                 "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                 "net_pnl": net_pnl, "reason": reason,
                                 "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
                             })
                             database.delete_sniper_trade(sp["id"])
-                            add_log(f"💰 [Sniper] إغلاق {sym} | خروج: {bid}$ | صافي: {net_pnl:+.3f}$ | عمولة: {fee_usd:.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                            add_log(f"💰 [{prof_name}] إغلاق نهائي لـ {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                         else:
                             still_snipers.append(sp)
                     else:
@@ -547,9 +628,11 @@ def trading_engine_loop():
                                             ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
 
                                         if ok:
-                                            gross_pnl = (bid - pos['entry_price']) * sell_qty
+                                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
+                                            real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
+                                            gross_pnl = (real_exit - pos['entry_price']) * sell_qty
                                             fee_rate = 0.0 if exec_type == "CHASE_LIMIT" else 0.001
-                                            fee_usd = (pos['entry_price'] * sell_qty * fee_rate) + (bid * sell_qty * fee_rate)
+                                            fee_usd = (pos['entry_price'] * sell_qty * fee_rate) + (real_exit * sell_qty * fee_rate)
                                             net_pnl = gross_pnl - fee_usd
                                             
                                             shared_state["bots"][bKey]["daily_pnl"] += net_pnl
@@ -559,12 +642,12 @@ def trading_engine_loop():
                                             
                                             database.archive_closed_trade({
                                                 "id": pos["id"], "bot_name": bKey, "symbol": sym,
-                                                "entry_price": pos["entry_price"], "exit_price": bid,
+                                                "entry_price": pos["entry_price"], "exit_price": real_exit,
                                                 "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                                 "net_pnl": net_pnl, "reason": reason,
                                                 "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                             })
-                                            add_log(f"💰 [{bKey}] بيع {sym} | خروج: {bid}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                            add_log(f"💰 [{bKey}] بيع {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                         else:
                                             if "30005" in str(res) or "Oversold" in str(res):
                                                 database.delete_active_trade(pos['id'])
@@ -644,15 +727,12 @@ def trading_engine_loop():
                                     database.delete_active_trade(pos['id'])
                                     continue
 
-                                if exec_type == "CHASE_LIMIT":
-                                    ok, res = execute_smart_chase_order(sym, "SELL", qty=sell_qty)
-                                else:
-                                    ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
-
+                                ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
                                 if ok:
-                                    gross_pnl = (bid - entry) * sell_qty
-                                    fee_rate = 0.0 if exec_type == "CHASE_LIMIT" else 0.001
-                                    fee_usd = (entry * sell_qty * fee_rate) + (bid * sell_qty * fee_rate)
+                                    usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
+                                    real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
+                                    gross_pnl = (real_exit - entry) * sell_qty
+                                    fee_usd = (entry * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
                                     net_pnl = gross_pnl - fee_usd
 
                                     shared_state["bots"]["BOT_3"]["daily_pnl"] += net_pnl
@@ -662,12 +742,12 @@ def trading_engine_loop():
                                     
                                     database.archive_closed_trade({
                                         "id": pos["id"], "bot_name": "BOT_3", "symbol": sym,
-                                        "entry_price": entry, "exit_price": bid,
+                                        "entry_price": entry, "exit_price": real_exit,
                                         "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                         "net_pnl": net_pnl, "reason": reason,
                                         "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
-                                    add_log(f"💰 [Bot 3] إغلاق {sym} | خروج: {bid}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    add_log(f"💰 [Bot 3] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                 else:
                                     if "30005" in str(res) or "Oversold" in str(res):
                                         database.delete_active_trade(pos['id'])
@@ -734,13 +814,18 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps(settings, ensure_ascii=False).encode('utf-8'))
 
-        elif self.path.startswith('/api/scanner'):
+        elif self.path == '/api/get_sniper_profiles':
+            profiles = database.get_sniper_profiles()
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps(profiles, ensure_ascii=False).encode('utf-8'))
+
+        # مسار سكانر الإشارات الفنية الاستباقية مع المعالجة المتوازية
+        elif self.path.startswith('/api/smart_scanner'):
             try:
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)
-                sort_mode = params.get("sort", ["price"])[0]
-                min_vol = float(params.get("min_vol", [50000])[0])
-                limit = int(params.get("limit", [4])[0])
+                tf = params.get("tf", ["5m"])[0]
+                filter_mode = params.get("filter", ["all"])[0]
 
                 url = f"{BASE_URL}/api/v3/ticker/24hr"
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -748,16 +833,27 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     tickers = json.loads(res.read().decode('utf-8'))
                     usdt_tickers = [
                         t for t in tickers 
-                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= min_vol
+                        if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= 40000
                     ]
-                    if sort_mode == "volume":
-                        usdt_tickers.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-                    else:
-                        usdt_tickers.sort(key=lambda x: float(x.get("priceChangePercent", 0)), reverse=True)
-                    
-                    top_gainers = usdt_tickers[:limit]
-                    self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
-                    self.wfile.write(json.dumps(top_gainers, ensure_ascii=False).encode('utf-8'))
+                    usdt_tickers.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+                    top_candidates = usdt_tickers[:30]
+
+                matched_signals = []
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    results = list(executor.map(lambda t: evaluate_coin_signals(t, tf=tf), top_candidates))
+                    for r in results:
+                        if r:
+                            if filter_mode == "triple" and r["signals_count"] < 3: continue
+                            if filter_mode == "vol" and not r["sig_vol"]: continue
+                            if filter_mode == "rsi" and not r["sig_rsi"]: continue
+                            if filter_mode == "ewo" and not r["sig_ewo"]: continue
+                            matched_signals.append(r)
+
+                # الترتيب الذكي: أولوية لـ 3 إشارات ثم 2 ثم 1
+                matched_signals.sort(key=lambda x: (x["signals_count"], float(x["change_pct"])), reverse=True)
+                
+                self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+                self.wfile.write(json.dumps(matched_signals[:16], ensure_ascii=False).encode('utf-8'))
             except Exception:
                 self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
                 self.wfile.write(b"[]")
@@ -846,14 +942,30 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": "✅ تم حفظ الإعدادات بنجاح!"}, ensure_ascii=False).encode('utf-8'))
 
+        elif self.path == '/api/save_sniper_profile':
+            p_id = data.get("profile_id", "SNIPER_1")
+            updates = {
+                "trade_size": float(data.get("trade_size", 10.0)),
+                "order_type": data.get("order_type", "CHASE_LIMIT"),
+                "tp1_pct": float(data.get("tp1_pct", 0.015)),
+                "tp2_pct": float(data.get("tp2_pct", 0.030)),
+                "sl_pct": float(data.get("sl_pct", 0.010)),
+                "trailing_cb": float(data.get("trailing_cb", 0.006))
+            }
+            database.save_sniper_profile(p_id, updates)
+            add_log(f"💾 تم حفظ بروفايل {p_id} في SQLite", "system", "info")
+            self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+            self.wfile.write(json.dumps({"msg": "✅ تم حفظ البروفايل بنجاح!"}, ensure_ascii=False).encode('utf-8'))
+
         elif self.path == '/api/sniper_buy':
+            prof = data.get("sniper_profile", "SNIPER_1")
             sym = data.get("symbol")
             size = float(data.get("size", 10.0))
             o_type = data.get("order_type", "CHASE_LIMIT")
-            tp1_pct = float(data.get("tp1_pct", 0.02))
-            tp2_pct = float(data.get("tp2_pct", 0.04))
-            sl_pct = float(data.get("sl_pct", 0.015))
-            ts_cb = float(data.get("trailing_cb", 0.008))
+            tp1_pct = float(data.get("tp1_pct", 0.015))
+            tp2_pct = float(data.get("tp2_pct", 0.030))
+            sl_pct = float(data.get("sl_pct", 0.010))
+            ts_cb = float(data.get("trailing_cb", 0.006))
 
             bid, ask = get_orderbook(sym)
             if ask:
@@ -867,7 +979,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     snp_id = f"snp_{int(time.time()*1000)}"
                     time_str = get_current_iso_time()
                     snp_trade = {
-                        "id": snp_id, "symbol": sym, "entry_price": ask,
+                        "id": snp_id, "sniper_profile": prof, "symbol": sym, "entry_price": ask,
                         "highest_price": ask, "qty": q, "orig_qty": q,
                         "tp1_pct": tp1_pct, "tp2_pct": tp2_pct,
                         "sl_pct": sl_pct, "trailing_cb": ts_cb,
@@ -875,7 +987,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     }
                     database.insert_sniper_trade(snp_trade)
                     shared_state["sniper_positions"].append(snp_trade)
-                    msg = f"🎯 تم قنص {sym} بنجاح عند {ask}$ (كمية: {q})"
+                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {ask}$ (كمية: {q})"
                     add_log(msg, "buys", "primary")
                 else:
                     msg = f"❌ فشل القنص: {res}"
@@ -895,13 +1007,15 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     sell_qty = min(sp["qty"], avail)
                     if float(format_quantity(sym, sell_qty)) > 0:
                         ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
-                        cur_p = bid if bid else sp["entry_price"]
-                        gross_pnl = (cur_p - sp["entry_price"]) * sell_qty
-                        fee_usd = (sp["entry_price"] * sell_qty * 0.001) + (cur_p * sell_qty * 0.001)
+                        usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
+                        real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else (bid if bid else sp["entry_price"])
+                        gross_pnl = (real_exit - sp["entry_price"]) * sell_qty
+                        fee_usd = (sp["entry_price"] * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
                         net_pnl = gross_pnl - fee_usd
+                        
                         database.archive_closed_trade({
-                            "id": s_id, "bot_name": "SNIPER", "symbol": sym,
-                            "entry_price": sp["entry_price"], "exit_price": cur_p,
+                            "id": s_id, "bot_name": sp.get("sniper_profile", "SNIPER_1"), "symbol": sym,
+                            "entry_price": sp["entry_price"], "exit_price": real_exit,
                             "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                             "net_pnl": net_pnl, "reason": "إغلاق يدوي للقناص",
                             "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
@@ -918,8 +1032,8 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             updates = {
                 "entry_price": float(data.get("entry_price", 0.0)),
                 "qty": float(data.get("qty", 0.0)),
-                "tp1_pct": float(data.get("tp1_pct", 0.02)),
-                "sl_pct": float(data.get("sl_pct", 0.015))
+                "tp1_pct": float(data.get("tp1_pct", 0.015)),
+                "sl_pct": float(data.get("sl_pct", 0.010))
             }
             database.update_sniper_trade(s_id, updates)
             for sp in shared_state.get("sniper_positions", []):
@@ -1062,9 +1176,10 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
 
                     if float(format_quantity(sym, sell_qty)) > 0:
                         ok, res = place_order(sym, "SELL", qty=sell_qty)
-                        cur_price = bid if bid else p['entry_price']
-                        gross_pnl = (cur_price - p['entry_price']) * sell_qty
-                        fee_usd = (p['entry_price'] * sell_qty * 0.001) + (cur_price * sell_qty * 0.001)
+                        usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
+                        real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else (bid if bid else p['entry_price'])
+                        gross_pnl = (real_exit - p['entry_price']) * sell_qty
+                        fee_usd = (p['entry_price'] * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
                         net_pnl = gross_pnl - fee_usd
 
                         shared_state["bots"][b_name]["daily_pnl"] += net_pnl
@@ -1074,12 +1189,12 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                         
                         database.archive_closed_trade({
                             "id": pos_id, "bot_name": b_name, "symbol": sym,
-                            "entry_price": p["entry_price"], "exit_price": cur_price,
+                            "entry_price": p["entry_price"], "exit_price": real_exit,
                             "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                             "net_pnl": net_pnl, "reason": "يدوي (Manual)",
                             "entry_time": p["time"], "exit_time": get_current_iso_time()
                         })
-                        add_log(f"🔥 تسييل {sym} في {b_name} بسعر {cur_price}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
+                        add_log(f"🔥 تسييل {sym} في {b_name} بسعر {real_exit}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
                     else:
                         database.delete_active_trade(pos_id)
                         add_log(f"⚠️ الرصيد 0، حذفت الصفقة", "system", "warning")
