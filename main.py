@@ -281,8 +281,9 @@ def calculate_ewo(candles):
 def evaluate_coin_signals(ticker, source="FUTURES", tf="5m", vol_th=2.0, rsi_th=38.0):
     raw_sym = ticker["symbol"]
     spot_sym = raw_sym.replace("_", "")
-    
-    if source == "FUTURES":
+    coin_source = ticker.get("source", source)
+
+    if coin_source == "FUTURES":
         fut_tf = "Min1" if tf == "1m" else ("Min5" if tf == "5m" else ("Min15" if tf == "15m" else "Min60"))
         candles = fetch_futures_klines(raw_sym, interval=fut_tf)
         if not candles or len(candles) < 25:
@@ -326,6 +327,7 @@ def evaluate_coin_signals(ticker, source="FUTURES", tf="5m", vol_th=2.0, rsi_th=
 
     return {
         "symbol": spot_sym,
+        "source": coin_source,
         "price": cur_price,
         "change_d_pct": round(change_d_pct, 2),
         "change_1h_pct": round(change_1h_pct, 2),
@@ -868,7 +870,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps(profiles, ensure_ascii=False).encode('utf-8'))
 
-        # مسار سكانر الإشارات الفنية الاستباقية مع دعم الفيوتشر والسبوت
+        # مسار سكانر الإشارات الفنية الاستباقية مع دعم دمج الفيوتشر والسبوت معاً
         elif self.path.startswith('/api/smart_scanner'):
             try:
                 query = urllib.parse.urlparse(self.path).query
@@ -881,41 +883,49 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 rsi_th = float(params.get("rsi_th", [38.0])[0])
 
                 top_candidates = []
-                if source == "FUTURES":
+                
+                # جلب مرشحي الفيوتشر
+                if source in ["FUTURES", "ALL"]:
                     try:
                         fut_url = f"{FUTURES_URL}/api/v1/contract/ticker"
                         req_f = urllib.request.Request(fut_url, headers={'User-Agent': 'Mozilla/5.0'})
-                        with urllib.request.urlopen(req_f, context=ssl_ctx, timeout=6) as res:
+                        with urllib.request.urlopen(req_f, context=ssl_ctx, timeout=5) as res:
                             f_data = json.loads(res.read().decode('utf-8'))
                             if f_data.get("success") and "data" in f_data:
                                 f_list = [
-                                    {"symbol": t.get("symbol"), "quoteVolume": float(t.get("amount24", 0))}
+                                    {"symbol": t.get("symbol"), "quoteVolume": float(t.get("amount24", 0)), "source": "FUTURES"}
                                     for t in f_data["data"]
                                     if t.get("symbol", "").endswith("_USDT") and float(t.get("amount24", 0)) >= 50000
                                 ]
                                 f_list.sort(key=lambda x: x["quoteVolume"], reverse=True)
-                                top_candidates = f_list[:35]
+                                top_candidates.extend(f_list[:25])
                     except Exception:
-                        top_candidates = []
+                        pass
 
-                if not top_candidates:
-                    url = f"{BASE_URL}/api/v3/ticker/24hr"
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, context=ssl_ctx, timeout=6) as res:
-                        tickers = json.loads(res.read().decode('utf-8'))
-                        usdt_tickers = [
-                            {"symbol": t.get("symbol"), "quoteVolume": float(t.get("quoteVolume", 0))}
-                            for t in tickers 
-                            if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= 40000
-                        ]
-                        usdt_tickers.sort(key=lambda x: x["quoteVolume"], reverse=True)
-                        top_candidates = usdt_tickers[:35]
+                # جلب مرشحي السبوت
+                if source in ["SPOT", "ALL"]:
+                    try:
+                        url = f"{BASE_URL}/api/v3/ticker/24hr"
+                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req, context=ssl_ctx, timeout=5) as res:
+                            tickers = json.loads(res.read().decode('utf-8'))
+                            usdt_tickers = [
+                                {"symbol": t.get("symbol"), "quoteVolume": float(t.get("quoteVolume", 0)), "source": "SPOT"}
+                                for t in tickers 
+                                if t.get("symbol", "").endswith("USDT") and float(t.get("quoteVolume", 0)) >= 40000
+                            ]
+                            usdt_tickers.sort(key=lambda x: x["quoteVolume"], reverse=True)
+                            top_candidates.extend(usdt_tickers[:25])
+                    except Exception:
+                        pass
 
                 matched_signals = []
                 with ThreadPoolExecutor(max_workers=8) as executor:
-                    results = list(executor.map(lambda t: evaluate_coin_signals(t, source=source, tf=tf, vol_th=vol_th, rsi_th=rsi_th), top_candidates))
+                    results = list(executor.map(lambda t: evaluate_coin_signals(t, source=t.get("source", "SPOT"), tf=tf, vol_th=vol_th, rsi_th=rsi_th), top_candidates))
+                    seen_symbols = set()
                     for r in results:
-                        if r:
+                        if r and r["symbol"] not in seen_symbols:
+                            seen_symbols.add(r["symbol"])
                             if filter_mode == "triple" and r["signals_count"] < 3: continue
                             if filter_mode == "vol" and not r["sig_vol"]: continue
                             if filter_mode == "rsi" and not r["sig_rsi"]: continue
