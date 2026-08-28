@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"><title>رادار وقناص العملات</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"><title>رادار وقناص العملات المتفجرة</title>
 <style>
 :root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
@@ -15,8 +15,13 @@ input,select{background:#090d16;border:1px solid var(--border);color:#fff;paddin
 details{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;overflow:hidden}
 summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font-size:12px}
 .form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;padding:8px}
-.gainers-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;margin-top:6px}
+.gainers-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:6px;margin-top:6px}
 .gainer-card{background:#151e30;border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;justify-content:space-between}
+.gainer-card.triple-confluence{border:1px solid #10b981;box-shadow:0 0 8px #10b98133}
+.badge-tag{padding:2px 4px;border-radius:4px;font-size:9.5px;font-weight:bold;display:inline-block}
+.tag-vol{background:#eab30822;color:#facc15}
+.tag-rsi{background:#06b6d422;color:#22d3ee}
+.tag-ewo{background:#ec489922;color:#f472b6}
 .inner-tabs{display:flex;gap:4px;margin:6px 0;background:#090d16;padding:4px;border-radius:6px}
 .inner-tab{flex:1;padding:6px;background:transparent;border:none;color:var(--sub);border-radius:4px;font-size:11px;font-weight:bold;cursor:pointer}
 .inner-tab.active{background:#1e293b;color:#fff}
@@ -36,17 +41,17 @@ th{color:var(--sub)}
   <div class="header-box">
     <div>
       <div style="display:flex;align-items:center;gap:6px">
-        <strong>🎯 رادار وقناص العملات</strong>
+        <strong>🎯 رادار وقناص الفرص المتفجرة</strong>
         <a href="/" style="color:#60a5fa;font-size:11px;text-decoration:none;background:#1e293b;padding:2px 6px;border-radius:4px">🏠 الرئيسية ↗</a>
       </div>
-      <div style="font-size:10px;color:var(--sub)">ربح القناص اليوم: <strong id="snp-daily-pnl" style="color:#10b981">+0.00$</strong></div>
+      <div style="font-size:10px;color:var(--sub)">ربح القناص الصافي اليوم: <strong id="snp-daily-pnl" style="color:#10b981">+0.00$</strong></div>
     </div>
     <div style="display:flex;align-items:center;gap:6px">
       <div class="wallet-bar">
         <div><span style="font-size:10px;color:var(--sub)">USDT:</span> <strong id="live-usdt" style="color:#10b981;font-size:12px">0.00 $</strong></div>
         <div style="border-right:1px solid var(--border);padding-right:6px"><span style="font-size:10px;color:var(--sub)">المحفظة:</span> <strong id="live-total-usd" style="color:#38bdf8;font-size:12px">0.00 $</strong></div>
       </div>
-      <button class="btn" style="background:#0284c7;color:#fff;font-size:10px" onclick="fetchGainers()">🔄</button>
+      <button class="btn" style="background:#0284c7;color:#fff;font-size:10px" onclick="fetchSmartScanner()">🔄</button>
     </div>
   </div>
 
@@ -55,58 +60,61 @@ th{color:var(--sub)}
     <button class="btn" style="background:var(--primary);color:#fff" onclick="searchAndLoadCoin()">تحميل 🎯</button>
   </div>
 
+  <!-- 1. رادار الإشارات الفنية الثلاثية -->
   <details open class="card" id="radar-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
-      <span style="color:#38bdf8">📡 رادار العملات المتفجرة</span>
-      <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleRadarSettings(); event.stopPropagation();" title="إعدادات وفلاتر الرادار">⚙️</button>
+      <span style="color:#38bdf8">📡 رادار الإشارات الفنية الاستباقية (Volume ⚡ | RSI 🌊 | EWO 🚀)</span>
+      <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleRadarSettings(); event.stopPropagation();" title="فلاتر الرادار">⚙️</button>
     </summary>
     
     <div id="radar-settings-panel" style="display:none;background:#090d16;padding:8px;border-radius:6px;margin:6px 0;border:1px solid var(--border)">
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
         <div>
-          <label style="font-size:9.5px;color:var(--sub)">عدد العملات</label>
-          <select id="rad-limit" onchange="fetchGainers()">
-            <option value="4" selected>4 عملات (افتراضي)</option>
-            <option value="8">8 عملات</option>
-            <option value="12">12 عملة</option>
-          </select>
-        </div>
-        <div>
-          <label style="font-size:9.5px;color:var(--sub)">الفريم الزمني</label>
-          <select id="rad-tf" onchange="fetchGainers()">
+          <label style="font-size:9.5px;color:var(--sub)">الفريم الزمني للفحص</label>
+          <select id="rad-tf" onchange="fetchSmartScanner()">
             <option value="1m">1 دقيقة</option>
-            <option value="5m" selected>5 دقائق</option>
-            <option value="1h">1 ساعة</option>
-            <option value="1d">1 يوم (24h)</option>
+            <option value="5m" selected>5 دقائق (افتراضي)</option>
+            <option value="15m">15 دقيقة</option>
           </select>
         </div>
         <div>
-          <label style="font-size:9.5px;color:var(--sub)">الفرز حسب</label>
-          <select id="rad-sort" onchange="fetchGainers()">
-            <option value="price" selected>نسبة الصعود %</option>
-            <option value="volume">حجم السيولة $</option>
+          <label style="font-size:9.5px;color:var(--sub)">تصفية الإشارات</label>
+          <select id="rad-filter" onchange="fetchSmartScanner()">
+            <option value="all" selected>عرض كل الإشارات (الترتيب للأقوى)</option>
+            <option value="triple">فرص الـ 3 إشارات معاً فقط (Triple 🌟)</option>
+            <option value="vol">انفجار السيولة ⚡ فقط</option>
+            <option value="rsi">ارتداد RSI 🌊 فقط</option>
+            <option value="ewo">زخم EWO 🚀 فقط</option>
           </select>
         </div>
       </div>
     </div>
 
     <div class="gainers-grid" id="gainers-container">
-      <div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">جاري مسح بيانات السوق...</div>
+      <div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">جاري مسح المؤشرات الفنية والسيولة...</div>
     </div>
   </details>
 
+  <!-- 2. الشارت الفني مع مؤشرات EWO و RSI و MACD -->
   <details open class="card">
-    <summary style="color:#a78bfa">📈 الشارت المباشر (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
-    <div style="height:300px;width:100%;margin-top:6px" id="tv_chart_container">
-      <iframe id="tv-iframe" src="https://s.tradingview.com/widgetembed/?symbol=MEXC%3ASOLUSDT&interval=5&theme=dark&style=1&locale=ar_AE&enablepublishing=false&hideideas=true" style="width:100%;height:100%;border:none"></iframe>
+    <summary style="color:#a78bfa">📈 الشارت المباشر والمؤشرات (<span id="chart-symbol-name">MEXC:SOLUSDT</span>) ▾</summary>
+    <div style="height:320px;width:100%;margin-top:6px" id="tv_chart_container">
+      <iframe id="tv-iframe" src="https://s.tradingview.com/widgetembed/?symbol=MEXC%3ASOLUSDT&interval=5&theme=dark&style=1&locale=ar_AE&studies=RSI%40tv-basicstudies%2CMACD%40tv-basicstudies&enablepublishing=false&hideideas=true" style="width:100%;height:100%;border:none"></iframe>
     </div>
   </details>
 
+  <!-- 3. لوحة القناص المزدوج (قناص 1 سريع / قناص 2 متوسط) -->
   <details open class="card hide-params" id="exec-panel-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
-      <span style="color:#10b981">⚡ لوحة القنص والتنفيذ السريع</span>
+      <span style="color:#10b981">⚡ لوحة القنص والتنفيذ (بروفايل 1 & 2)</span>
       <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleExecParams(); event.stopPropagation();" title="تعديل الأهداف والوقف">⚙️</button>
     </summary>
+    
+    <div class="inner-tabs" style="margin-top:4px">
+      <button class="inner-tab active" id="btn-tab-snp1" onclick="switchSniperProfile('SNIPER_1')">🎯 قناص 1 (سكالبينج سريع)</button>
+      <button class="inner-tab" id="btn-tab-snp2" onclick="switchSniperProfile('SNIPER_2')">🌊 قناص 2 (موجات متوسطة)</button>
+    </div>
+
     <div class="form-row">
       <div>
         <label style="font-size:10px;color:var(--sub)">العملة</label>
@@ -119,36 +127,40 @@ th{color:var(--sub)}
       <div>
         <label style="font-size:10px;color:var(--sub)">نوع الأمر</label>
         <select id="snp-type">
-          <option value="CHASE_LIMIT">متتبع صانع سوق (Chase 0% Fee)</option>
+          <option value="CHASE_LIMIT">متتبع (0% Maker Fee)</option>
           <option value="MARKET">سوق فوري (Market)</option>
         </select>
       </div>
       <div class="advanced-param">
         <label style="font-size:10px;color:var(--sub)">هدف 1 (TP1 %)</label>
-        <input type="number" id="snp-tp1" value="2.0" step="0.1">
+        <input type="number" id="snp-tp1" value="1.5" step="0.1">
       </div>
       <div class="advanced-param">
         <label style="font-size:10px;color:var(--sub)">هدف 2 (TP2 %)</label>
-        <input type="number" id="snp-tp2" value="4.5" step="0.1">
+        <input type="number" id="snp-tp2" value="3.0" step="0.1">
       </div>
       <div class="advanced-param">
         <label style="font-size:10px;color:var(--sub)">وقف (SL %)</label>
-        <input type="number" id="snp-sl" value="1.5" step="0.1">
+        <input type="number" id="snp-sl" value="1.0" step="0.1">
       </div>
       <div class="advanced-param">
         <label style="font-size:10px;color:var(--sub)">متحرك (TS %)</label>
-        <input type="number" id="snp-ts" value="0.8" step="0.1">
+        <input type="number" id="snp-ts" value="0.6" step="0.1">
+      </div>
+      <div class="advanced-param" style="display:flex;align-items:flex-end">
+        <button class="btn" style="background:#3b82f6;color:#fff;width:100%" onclick="saveCurrentProfileConfig()">💾 حفظ الإعداد</button>
       </div>
     </div>
     <div style="padding:0 8px 8px 8px">
-      <button class="btn" style="background:#10b981;color:#fff;width:100%;padding:10px;font-size:13px" onclick="executeSnipe()">🎯 إطلاق قنص العملة فوري</button>
+      <button class="btn" id="main-snipe-btn" style="background:#10b981;color:#fff;width:100%;padding:10px;font-size:13px" onclick="executeSnipe()">🎯 إطلاق قنص 1 (سريع)</button>
     </div>
   </details>
 
+  <!-- 4. إدارة صفقات القناص مع التاقات والـ Live PnL المباشر -->
   <details open class="card" id="sniper-trades-box">
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <div style="display:flex;align-items:center;gap:6px">
-        <span style="color:#fbbf24">📂 إدارة صفقات وأوامر القناص</span>
+        <span style="color:#fbbf24">📂 صفقات وأوامر القناص</span>
         <span style="font-size:11px;color:var(--sub)">(Live PnL: <strong id="snp-live-pnl-header" style="color:#10b981">+0.00$</strong>)</span>
       </div>
       <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('sniper-trades-box'); event.stopPropagation();" title="إظهار/إخفاء أزرار الإجراءات">⚙️</button>
@@ -165,18 +177,19 @@ th{color:var(--sub)}
         <table id="sniper-pos-table">
           <thead>
             <tr>
-              <th onclick="sortTable('sniper-pos-table', 0)" style="cursor:pointer">العملة ⇕</th>
+              <th>النوع</th>
+              <th onclick="sortTable('sniper-pos-table', 1)" style="cursor:pointer">العملة ⇕</th>
               <th>الدخول</th>
               <th>أعلى سعر</th>
               <th>الكمية</th>
-              <th onclick="sortTable('sniper-pos-table', 4)" style="cursor:pointer">Live PnL ⇕</th>
+              <th onclick="sortTable('sniper-pos-table', 5)" style="cursor:pointer">Live PnL ⇕</th>
               <th>حالة الهدف</th>
-              <th onclick="sortTable('sniper-pos-table', 6)" style="cursor:pointer">الوقت والتاريخ ⇕</th>
+              <th onclick="sortTable('sniper-pos-table', 7)" style="cursor:pointer">الوقت ⇕</th>
               <th class="manage-ctrl">إجراءات</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات قناص نشطة</td></tr>
+            <tr><td colspan="9" style="text-align:center;color:var(--sub)">لا توجد صفقات قناص نشطة</td></tr>
           </tbody>
         </table>
       </div>
@@ -185,7 +198,7 @@ th{color:var(--sub)}
     <div id="p-pending" class="inner-pane">
       <div style="overflow-x:auto">
         <table id="snp-pending-table">
-          <thead><tr><th>العملة</th><th>النوع</th><th>السعر</th><th>الكمية</th><th>الوقت والتاريخ</th><th class="manage-ctrl">إلغاء</th></tr></thead>
+          <thead><tr><th>العملة</th><th>النوع</th><th>السعر</th><th>الكمية</th><th>الوقت</th><th class="manage-ctrl">إلغاء</th></tr></thead>
           <tbody><tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد أوامر معلقة</td></tr></tbody>
         </table>
       </div>
@@ -194,8 +207,8 @@ th{color:var(--sub)}
     <div id="p-closed" class="inner-pane">
       <div style="overflow-x:auto">
         <table id="snp-closed-table">
-          <thead><tr><th>العملة</th><th>الدخول</th><th>الخروج</th><th>الكمية</th><th>صافي الربح</th><th>العمولة</th><th>السبب</th><th onclick="sortTable('snp-closed-table', 7)" style="cursor:pointer">الوقت والتاريخ ⇕</th></tr></thead>
-          <tbody><tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات مؤرشفة</td></tr></tbody>
+          <thead><tr><th>النوع</th><th>العملة</th><th>الدخول</th><th>الخروج</th><th>الكمية</th><th>صافي الربح</th><th>العمولة</th><th>السبب</th><th onclick="sortTable('snp-closed-table', 8)" style="cursor:pointer">الوقت والتاريخ ⇕</th></tr></thead>
+          <tbody><tr><td colspan="9" style="text-align:center;color:var(--sub)">لا توجد صفقات مؤرشفة</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -218,6 +231,8 @@ th{color:var(--sub)}
 
 <script>
 let freeUsdt = 0;
+let currentSniperProfile = 'SNIPER_1';
+let sniperProfiles = {};
 
 function switchInnerTab(paneId, btn){
   document.querySelectorAll('.inner-pane').forEach(p => p.classList.remove('active'));
@@ -240,6 +255,57 @@ function toggleManage(boxId){
   if(el) el.classList.toggle('manage-mode');
 }
 
+async function loadProfiles(){
+  try{
+    const r = await fetch('/api/get_sniper_profiles');
+    sniperProfiles = await r.json();
+    applyProfileToUI(currentSniperProfile);
+  }catch(e){}
+}
+loadProfiles();
+
+function switchSniperProfile(pId){
+  currentSniperProfile = pId;
+  document.getElementById('btn-tab-snp1').classList.toggle('active', pId === 'SNIPER_1');
+  document.getElementById('btn-tab-snp2').classList.toggle('active', pId === 'SNIPER_2');
+  applyProfileToUI(pId);
+}
+
+function applyProfileToUI(pId){
+  const p = sniperProfiles[pId];
+  if(!p) return;
+  document.getElementById('snp-size').value = p.trade_size || 10;
+  document.getElementById('snp-type').value = p.order_type || 'CHASE_LIMIT';
+  document.getElementById('snp-tp1').value = ((p.tp1_pct || 0.015) * 100).toFixed(1);
+  document.getElementById('snp-tp2').value = ((p.tp2_pct || 0.030) * 100).toFixed(1);
+  document.getElementById('snp-sl').value = ((p.sl_pct || 0.010) * 100).toFixed(1);
+  document.getElementById('snp-ts').value = ((p.trailing_cb || 0.006) * 100).toFixed(1);
+  
+  const btn = document.getElementById('main-snipe-btn');
+  if(pId === 'SNIPER_1'){
+    btn.style.background = '#10b981';
+    btn.innerText = '🎯 إطلاق قنص 1 (سكالبينج سريع)';
+  } else {
+    btn.style.background = '#8b5cf6';
+    btn.innerText = '🌊 إطلاق قنص 2 (موجات متوسطة)';
+  }
+}
+
+async function saveCurrentProfileConfig(){
+  const payload = {
+    profile_id: currentSniperProfile,
+    trade_size: parseFloat(document.getElementById('snp-size').value),
+    order_type: document.getElementById('snp-type').value,
+    tp1_pct: parseFloat(document.getElementById('snp-tp1').value) / 100.0,
+    tp2_pct: parseFloat(document.getElementById('snp-tp2').value) / 100.0,
+    sl_pct: parseFloat(document.getElementById('snp-sl').value) / 100.0,
+    trailing_cb: parseFloat(document.getElementById('snp-ts').value) / 100.0
+  };
+  await fetch('/api/save_sniper_profile', {method:'POST', body:JSON.stringify(payload)});
+  sniperProfiles[currentSniperProfile] = payload;
+  alert('✅ تم حفظ إعدادات ' + (currentSniperProfile==='SNIPER_1'?'قناص 1':'قناص 2') + ' بنجاح!');
+}
+
 async function loadBal(){
   try{
     const r = await fetch('/api/data');
@@ -251,45 +317,53 @@ async function loadBal(){
 }
 loadBal(); setInterval(loadBal, 3000);
 
-async function fetchGainers(){
+// سكانر الإشارات الفنية الاستباقية
+async function fetchSmartScanner(){
   try{
-    const sortMode = document.getElementById('rad-sort').value;
     const tf = document.getElementById('rad-tf').value;
-    const limit = document.getElementById('rad-limit').value;
+    const filter = document.getElementById('rad-filter').value;
 
-    const r = await fetch(`/api/scanner?sort=${sortMode}&tf=${tf}&limit=${limit}`);
-    const gainers = await r.json();
+    const r = await fetch(`/api/smart_scanner?tf=${tf}&filter=${filter}`);
+    const results = await r.json();
     let h = '';
-    if(Array.isArray(gainers) && gainers.length > 0){
-      gainers.forEach(g => {
-        const chg = parseFloat(g.priceChangePercent);
+    if(Array.isArray(results) && results.length > 0){
+      results.forEach(g => {
+        const isTriple = g.signals_count === 3;
+        const cardCls = isTriple ? 'gainer-card triple-confluence' : 'gainer-card';
+        const chg = parseFloat(g.change_pct);
         const color = chg >= 0 ? 'var(--success)' : 'var(--danger)';
+
+        let badges = '';
+        if(g.sig_vol) badges += `<span class="badge-tag tag-vol">⚡ سيولة ${g.vol_mult}x</span> `;
+        if(g.sig_rsi) badges += `<span class="badge-tag tag-rsi">🌊 RSI (${g.rsi_val})</span> `;
+        if(g.sig_ewo) badges += `<span class="badge-tag tag-ewo">🚀 EWO تقاطع</span> `;
+
         h += `
-        <div class="gainer-card">
+        <div class="${cardCls}">
           <div>
             <div style="display:flex;justify-content:space-between;align-items:center">
-              <strong style="color:#f3f4f6">${g.symbol.replace('USDT','')}</strong>
+              <strong style="color:#f3f4f6;font-size:12px">${g.symbol.replace('USDT','')}</strong>
               <span style="color:${color};font-weight:bold;font-size:11px">${chg>=0?'+':''}${chg.toFixed(2)}%</span>
             </div>
-            <div style="font-size:10px;color:var(--sub);margin:2px 0">${parseFloat(g.lastPrice)}$</div>
-            <div style="font-size:9px;color:var(--sub)">فوليوم: ${(parseFloat(g.quoteVolume)/1000).toFixed(0)}k $</div>
+            <div style="font-size:10px;color:var(--sub);margin:2px 0">${g.price}$</div>
+            <div style="margin:4px 0;line-height:1.6">${badges}</div>
           </div>
-          <button class="btn" style="background:#0284c7;color:#fff;width:100%;margin-top:6px" onclick="selectAndLoadUnified('${g.symbol}')">🎯 قنص وشارت</button>
+          <button class="btn" style="background:${isTriple?'#10b981':'#0284c7'};color:#fff;width:100%;margin-top:4px" onclick="selectAndLoadUnified('${g.symbol}')">🎯 شارت وقنص</button>
         </div>`;
       });
     } else {
-      h = '<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">لا توجد بيانات مطابقة</div>';
+      h = '<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">لا توجد إشارات مطابقة حالياً للفلاتر</div>';
     }
     document.getElementById('gainers-container').innerHTML = h;
   }catch(e){}
 }
-fetchGainers(); setInterval(fetchGainers, 20000);
+fetchSmartScanner(); setInterval(fetchSmartScanner, 15000);
 
 function selectAndLoadUnified(sym){
   const fullSym = sym.endsWith('USDT') ? sym : sym + 'USDT';
   document.getElementById('snp-sym').value = fullSym;
   document.getElementById('chart-symbol-name').innerText = 'MEXC:' + fullSym;
-  document.getElementById('tv-iframe').src = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${fullSym}&interval=5&theme=dark&style=1&locale=ar_AE&enablepublishing=false&hideideas=true`;
+  document.getElementById('tv-iframe').src = `https://s.tradingview.com/widgetembed/?symbol=MEXC%3A${fullSym}&interval=5&theme=dark&style=1&locale=ar_AE&studies=RSI%40tv-basicstudies%2CMACD%40tv-basicstudies&enablepublishing=false&hideideas=true`;
 }
 
 function searchAndLoadCoin(){
@@ -312,6 +386,7 @@ async function executeSnipe(){
   if(!sym || !size){ alert("أدخل رمز العملة والمبلغ"); return; }
 
   const payload = {
+    sniper_profile: currentSniperProfile,
     symbol: sym,
     size: size,
     order_type: o_type,
@@ -321,7 +396,8 @@ async function executeSnipe(){
     trailing_cb: ts / 100.0
   };
 
-  if(confirm(`تأكيد إطلاق قنص ${payload.symbol} بقيمة ${size}$؟`)){
+  const profName = currentSniperProfile === 'SNIPER_1' ? 'قناص 1 (سريع)' : 'قناص 2 (متوسط)';
+  if(confirm(`تأكيد إطلاق ${profName} لـ ${payload.symbol} بقيمة ${size}$؟`)){
     const r = await fetch('/api/sniper_buy', {method:'POST', body:JSON.stringify(payload)});
     const d = await r.json();
     alert(d.msg);
@@ -343,8 +419,12 @@ async function updateSniperPositions(){
         const livePnlPct = ((curBid - p.entry_price) / p.entry_price) * 100.0;
         const pnlColor = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
         const beStatus = p.tp1_hit ? '<span style="color:#10b981;font-weight:bold">TP1 محقق (مؤمن) ✅</span>' : 'قيد الانتظار';
+        const tagHtml = p.sniper_profile === 'SNIPER_2' ? 
+          '<span class="badge-tag" style="background:#8b5cf633;color:#c084fc">🌊 قناص 2</span>' : 
+          '<span class="badge-tag" style="background:#0284c733;color:#38bdf8">🎯 قناص 1</span>';
 
         h += `<tr>
+          <td>${tagHtml}</td>
           <td><strong style="color:#38bdf8;cursor:pointer;text-decoration:underline" onclick="selectAndLoadUnified('${p.symbol}')">${p.symbol}</strong></td>
           <td>${p.entry_price}$</td>
           <td>${p.highest_price}$</td>
@@ -355,14 +435,14 @@ async function updateSniperPositions(){
           <td class="manage-ctrl">
             <div style="display:flex;gap:2px">
               <button class="icon-btn" style="background:var(--danger);color:#fff" title="تسييل" onclick="closeSniperPos('${p.id}', '${p.symbol}')">🔥</button>
-              <button class="icon-btn" style="background:#3b82f6;color:#fff" title="تعديل" onclick="openEditSniper('${p.id}', ${p.entry_price}, ${p.qty}, ${p.tp1_pct||0.02}, ${p.sl_pct||0.015})">✏️</button>
+              <button class="icon-btn" style="background:#3b82f6;color:#fff" title="تعديل" onclick="openEditSniper('${p.id}', ${p.entry_price}, ${p.qty}, ${p.tp1_pct||0.015}, ${p.sl_pct||0.010})">✏️</button>
               <button class="icon-btn" style="background:#475569;color:#fca5a5" title="إلغاء دون بيع" onclick="unlinkSniperPos('${p.id}', '${p.symbol}')">🚫</button>
             </div>
           </td>
         </tr>`;
       });
     } else {
-      h = '<tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات قناص نشطة</td></tr>';
+      h = '<tr><td colspan="9" style="text-align:center;color:var(--sub)">لا توجد صفقات قناص نشطة</td></tr>';
     }
     document.getElementById('sniper-pos-table').querySelector('tbody').innerHTML = h;
     
@@ -370,24 +450,29 @@ async function updateSniperPositions(){
     liveHeaderEl.innerText = (totLive >= 0 ? '+' : '') + totLive.toFixed(3) + ' $';
     liveHeaderEl.style.color = totLive >= 0 ? 'var(--success)' : 'var(--danger)';
 
-    fetch('/api/history?bot_name=SNIPER').then(res=>res.json()).then(hList=>{
+    fetch('/api/history?bot_name=SNIPER_ALL').then(res=>res.json()).then(hList=>{
       let clH = '';
       let dayPnl = 0;
       hList.forEach(c => {
         dayPnl += c.net_pnl;
         const netColor = c.net_pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+        const tagHtml = c.bot_name === 'SNIPER_2' ? 
+          '<span class="badge-tag" style="background:#8b5cf633;color:#c084fc">🌊 قناص 2</span>' : 
+          '<span class="badge-tag" style="background:#0284c733;color:#38bdf8">🎯 قناص 1</span>';
+
         clH += `<tr>
+          <td>${tagHtml}</td>
           <td><strong>${c.symbol}</strong></td>
           <td>${c.entry_price}$</td>
           <td>${c.exit_price}$</td>
           <td>${c.qty}</td>
           <td style="color:${netColor};font-weight:bold">${c.net_pnl>=0?'+':''}${c.net_pnl.toFixed(3)}$</td>
           <td style="color:var(--sub)">${c.fee_usd.toFixed(3)}$</td>
-          <td><span class="badge">${c.reason}</span></td>
+          <td><span class="badge-tag" style="background:#1e293b">${c.reason}</span></td>
           <td>${c.exit_time}</td>
         </tr>`;
       });
-      document.getElementById('snp-closed-table').querySelector('tbody').innerHTML = clH || '<tr><td colspan="8" style="text-align:center;color:var(--sub)">لا توجد صفقات مغلقة</td></tr>';
+      document.getElementById('snp-closed-table').querySelector('tbody').innerHTML = clH || '<tr><td colspan="9" style="text-align:center;color:var(--sub)">لا توجد صفقات مغلقة</td></tr>';
       document.getElementById('snp-daily-pnl').innerText = (dayPnl >= 0 ? '+' : '') + dayPnl.toFixed(3) + ' $';
       document.getElementById('snp-daily-pnl').style.color = dayPnl >= 0 ? 'var(--success)' : 'var(--danger)';
     });
