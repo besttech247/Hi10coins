@@ -32,9 +32,10 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
 .inner-pane.active{display:block}
 .pct-btn{background:#151e30;border:1px solid var(--border);color:var(--sub);padding:4px 8px;border-radius:5px;cursor:pointer;font-size:10.5px;font-weight:bold}
 .pct-btn:hover{background:#1e293b;color:#fff}
-.scanner-toggle-btn{padding:4px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--sub);font-size:11px;font-weight:bold;cursor:pointer;transition:all 0.2s}
+.scanner-toggle-btn{padding:3px 8px;border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--sub);font-size:10px;font-weight:bold;cursor:pointer;transition:all 0.2s}
 .scanner-toggle-btn.fut-active{background:#8b5cf6;color:#fff;border-color:#8b5cf6;box-shadow:0 0 8px #8b5cf655}
 .scanner-toggle-btn.spot-active{background:#10b981;color:#fff;border-color:#10b981;box-shadow:0 0 8px #10b98155}
+.scanner-toggle-btn.all-active{background:#0284c7;color:#fff;border-color:#0284c7;box-shadow:0 0 8px #0284c755}
 table{width:100%;border-collapse:collapse;text-align:right}
 th,td{padding:6px 4px;border-bottom:1px solid var(--border);font-size:11px}
 th{color:var(--sub)}
@@ -70,14 +71,15 @@ th{color:var(--sub)}
     <button class="btn" style="background:var(--primary);color:#fff" onclick="searchAndLoadCoin()">تحميل 🎯</button>
   </div>
 
-  <!-- 1. رادار العملات (مع شارات ليزر ملونة للفيوتشر والسبوت) -->
+  <!-- 1. رادار العملات (أزرار: فيوتشر / سبوت / الكل) -->
   <details open class="card" id="radar-card">
     <summary style="display:flex;justify-content:space-between;align-items:center">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span style="color:#38bdf8;font-weight:bold">📡 سكانر</span>
-        <div style="display:flex;gap:4px">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="color:#38bdf8;font-weight:bold;font-size:11.5px">📡 سكانر</span>
+        <div style="display:flex;gap:3px">
           <button type="button" class="scanner-toggle-btn fut-active" id="tab-scan-fut" onclick="setScannerSource('FUTURES'); event.stopPropagation();">🔮 فيوتشر</button>
           <button type="button" class="scanner-toggle-btn" id="tab-scan-spot" onclick="setScannerSource('SPOT'); event.stopPropagation();">🟢 سبوت</button>
+          <button type="button" class="scanner-toggle-btn" id="tab-scan-all" onclick="setScannerSource('ALL'); event.stopPropagation();">🌟 الكل</button>
         </div>
       </div>
       <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleRadarSettings(); event.stopPropagation();" title="إعدادات الرادار والمؤشرات">⚙️</button>
@@ -134,9 +136,7 @@ th{color:var(--sub)}
       </div>
     </div>
 
-    <div class="gainers-grid" id="gainers-container">
-      <div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">جاري مسح المؤشرات...</div>
-    </div>
+    <div class="gainers-grid" id="gainers-container"></div>
   </details>
 
   <!-- 2. الشارت الفني المباشر -->
@@ -297,15 +297,11 @@ let currentScannerSource = 'FUTURES';
 
 function setScannerSource(source){
   currentScannerSource = source;
-  const isFut = source === 'FUTURES';
   
-  const bFut = document.getElementById('tab-scan-fut');
-  const bSpot = document.getElementById('tab-scan-spot');
+  document.getElementById('tab-scan-fut').className = (source === 'FUTURES') ? 'scanner-toggle-btn fut-active' : 'scanner-toggle-btn';
+  document.getElementById('tab-scan-spot').className = (source === 'SPOT') ? 'scanner-toggle-btn spot-active' : 'scanner-toggle-btn';
+  document.getElementById('tab-scan-all').className = (source === 'ALL') ? 'scanner-toggle-btn all-active' : 'scanner-toggle-btn';
   
-  bFut.className = isFut ? 'scanner-toggle-btn fut-active' : 'scanner-toggle-btn';
-  bSpot.className = !isFut ? 'scanner-toggle-btn spot-active' : 'scanner-toggle-btn';
-  
-  document.getElementById('gainers-container').innerHTML = `<div style="grid-column:1/-1;text-align:center;color:${isFut?'#c084fc':'#34d399'};padding:10px;font-size:11px">⚡ جاري مسح ${isFut?'رادار الفيوتشر 🔮':'رادار السبوت 🟢'}...</div>`;
   fetchSmartScanner();
 }
 
@@ -410,7 +406,7 @@ function updatePanelPrice(){
   }
 }
 
-// جلب نتائج السكانر مع تطبيق الشارات والحدود اللونية الخاصة
+// جلب نتائج السكانر
 async function fetchSmartScanner(){
   try{
     const tf = document.getElementById('rad-tf').value;
@@ -422,19 +418,19 @@ async function fetchSmartScanner(){
     const r = await fetch(`/api/smart_scanner?source=${currentScannerSource}&tf=${tf}&filter=${filter}&limit=${limit}&vol_mult=${volMult}&rsi_th=${rsiTh}`);
     const results = await r.json();
     let h = '';
-    const isFut = currentScannerSource === 'FUTURES';
 
     if(Array.isArray(results) && results.length > 0){
       results.forEach(g => {
         const isTriple = g.signals_count === 3;
-        const cardCls = `gainer-card ${isFut?'mode-fut':'mode-spot'} ${isTriple?'triple-confluence':''}`;
+        const isFutCoin = g.source === 'FUTURES';
+        const cardCls = `gainer-card ${isFutCoin?'mode-fut':'mode-spot'} ${isTriple?'triple-confluence':''}`;
         
         const dChg = parseFloat(g.change_d_pct || 0);
         const hChg = parseFloat(g.change_1h_pct || 0);
         const dColor = dChg >= 0 ? 'var(--success)' : 'var(--danger)';
         const hColor = hChg >= 0 ? 'var(--success)' : 'var(--danger)';
 
-        const srcBadge = isFut ? 
+        const srcBadge = isFutCoin ? 
           '<span class="badge-tag" style="background:#8b5cf633;color:#c084fc">🔮 فيوتشر</span>' : 
           '<span class="badge-tag" style="background:#10b98133;color:#34d399">🟢 سبوت</span>';
 
@@ -462,7 +458,7 @@ async function fetchSmartScanner(){
         </div>`;
       });
     } else {
-      h = `<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">لا توجد إشارات مطابقة حالياً في ${isFut?'الفيوتشر':'السبوت'}</div>`;
+      h = `<div style="grid-column:1/-1;text-align:center;color:var(--sub);padding:10px">لا توجد إشارات مطابقة حالياً</div>`;
     }
     document.getElementById('gainers-container').innerHTML = h;
   }catch(e){}
