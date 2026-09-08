@@ -143,8 +143,8 @@ let freeUsdt = 0;
 
 function updateWalletHeader(d){
   freeUsdt = d.real_balance_usdt || 0;
-  document.getElementById('live-usdt').innerText = freeUsdt.toFixed(2) + ' $';
-  document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0).toFixed(2) + ' $';
+  document.getElementById('live-usdt').innerText = freeUsdt.toFixed(2) + '$';
+  document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0).toFixed(2) + '$';
 }
 
 async function loadBalAndSettings(){
