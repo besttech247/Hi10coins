@@ -27,6 +27,8 @@ ssl_ctx = ssl._create_unverified_context()
 START_TIME = time.time()
 
 SYMBOL_RULES = {}
+UNSUPPORTED_API_SYMBOLS = set()
+MIN_SELL_NOTIONAL_USDT = 1.0
 LAST_ENTRY_CANDLE = {}
 BOT_KEYS = ["BOT_1", "BOT_X1", "BOT_X2", "BOT_X3", "BOT_EWO_MTF", "BOT_EWO_MTFH"]
 CLASSIC_BOTS = ["BOT_1"]
@@ -336,7 +338,8 @@ def mexc_private_request(endpoint, method="GET", params=None):
         return False, str(e)
 
 def update_exchange_info(symbol):
-    if symbol in SYMBOL_RULES: return
+    if symbol in SYMBOL_RULES:
+        return
     try:
         url = f"{BASE_URL}/api/v3/exchangeInfo?symbol={symbol}"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -346,11 +349,58 @@ def update_exchange_info(symbol):
                 if s["symbol"] == symbol:
                     base_prec = int(s.get("baseAssetPrecision", 2))
                     quote_prec = int(s.get("quotePrecision", 4))
-                    SYMBOL_RULES[symbol] = {"base_prec": base_prec, "quote_prec": quote_prec}
+                    status = str(s.get("status", "ENABLED")).upper()
+                    supported = status in ("ENABLED", "1", "TRUE", "")
+                    SYMBOL_RULES[symbol] = {
+                        "base_prec": base_prec,
+                        "quote_prec": quote_prec,
+                        "supported": supported
+                    }
+                    if not supported:
+                        UNSUPPORTED_API_SYMBOLS.add(symbol)
                     return
+            # exchange answered but symbol missing → not API-tradable
+            SYMBOL_RULES[symbol] = {"base_prec": 2, "quote_prec": 4, "supported": False}
+            UNSUPPORTED_API_SYMBOLS.add(symbol)
     except Exception:
-        pass
-    SYMBOL_RULES[symbol] = {"base_prec": 2, "quote_prec": 4}
+        # Network/parse failure: keep provisional rules, do not blacklist permanently
+        SYMBOL_RULES[symbol] = {"base_prec": 2, "quote_prec": 4, "supported": True}
+
+def symbol_api_supported(symbol):
+    if symbol in UNSUPPORTED_API_SYMBOLS:
+        return False
+    update_exchange_info(symbol)
+    return bool(SYMBOL_RULES.get(symbol, {}).get("supported", True))
+
+def asset_to_usdt_symbol(asset):
+    asset = str(asset or "").strip()
+    if not asset or asset in ("USDT", "USDC"):
+        return None
+    # Skip non-standard wallet names like GOLD(XAUT)
+    if any(ch in asset for ch in "()[]{}/\\ "):
+        return None
+    return f"{asset}USDT"
+
+def can_market_sell_wallet_asset(asset_row, min_notional=MIN_SELL_NOTIONAL_USDT):
+    """
+    Pre-check before dust/panic sells.
+    Returns (True, symbol) or (False, reason_code).
+    """
+    asset = asset_row.get("asset")
+    free_qty = float(asset_row.get("free", 0.0) or 0.0)
+    val_usd = float(asset_row.get("usd_value", 0.0) or 0.0)
+    if asset in ("USDT", "USDC"):
+        return False, "stable"
+    if free_qty <= 0:
+        return False, "zero"
+    sym = asset_to_usdt_symbol(asset)
+    if not sym:
+        return False, "bad_symbol"
+    if val_usd < float(min_notional):
+        return False, "below_min"
+    if not symbol_api_supported(sym):
+        return False, "unsupported"
+    return True, sym
 
 def format_quantity(symbol, qty):
     update_exchange_info(symbol)
@@ -699,6 +749,11 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
     add_log(f"📤 طلب {side.upper()} {symbol} ({order_type}){price_info}", "orders", "info")
     ok, res = mexc_private_request("/api/v3/order", method="POST", params=params)
     if not ok:
+        err_s = str(res)
+        if "10007" in err_s or "not support api" in err_s.lower():
+            UNSUPPORTED_API_SYMBOLS.add(symbol)
+            if symbol in SYMBOL_RULES:
+                SYMBOL_RULES[symbol]["supported"] = False
         add_log(f"❌ خطأ {symbol}: {res}", "orders", "danger")
         return ok, res
     fee_mode = "MARKET" if order_type.upper() == "MARKET" else "LIMIT"
@@ -2106,42 +2161,112 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == '/api/convert_dust_direct':
             total_sold_usd = 0.0
+            sold_n = 0
+            skip_min = 0
+            skip_unsup = 0
+            skip_other = 0
             for a in shared_state.get("wallet_assets", []):
-                asset = a["asset"]
-                free_qty = float(a["free"])
-                val_usd = float(a.get("usd_value", 0.0))
-                if asset not in ["USDT", "USDC", "MX"] and val_usd < 5.0 and free_qty > 0:
-                    sym = f"{asset}USDT"
-                    ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
-                    if ok: total_sold_usd += val_usd
+                asset = a.get("asset")
+                if asset in ("USDT", "USDC", "MX"):
+                    continue
+                free_qty = float(a.get("free", 0.0) or 0.0)
+                val_usd = float(a.get("usd_value", 0.0) or 0.0)
+                if free_qty <= 0:
+                    continue
+                # Dust window: sellable only if >= exchange min notional and < 5$
+                if val_usd >= 5.0:
+                    continue
+                ok_can, info = can_market_sell_wallet_asset(a, min_notional=MIN_SELL_NOTIONAL_USDT)
+                if not ok_can:
+                    if info == "below_min":
+                        skip_min += 1
+                    elif info == "unsupported":
+                        skip_unsup += 1
+                    else:
+                        skip_other += 1
+                    continue
+                sym = info
+                ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
+                if ok:
+                    total_sold_usd += val_usd
+                    sold_n += 1
+                else:
+                    err_s = str(res)
+                    if "10007" in err_s or "not support api" in err_s.lower():
+                        skip_unsup += 1
+                    elif "30002" in err_s:
+                        skip_min += 1
+                    else:
+                        skip_other += 1
             if total_sold_usd > 1.0:
                 place_order("MXUSDT", "BUY", quote_qty=total_sold_usd, order_type="MARKET")
-                msg = f"✅ تم تحويل الأرصدة الصغيرة لـ MX بقيمة {total_sold_usd:.2f}$"
+                msg = f"✅ تحويل غبار→MX: بيع {sold_n} بقيمة {total_sold_usd:.2f}$"
             else:
-                msg = "لا توجد أرصدة صغيرة للتحويل"
+                msg = "لا توجد أرصدة صغيرة قابلة للتحويل (≥1$ و <5$)"
+            skip_bits = []
+            if skip_min:
+                skip_bits.append(f"{skip_min} دون حد 1$")
+            if skip_unsup:
+                skip_bits.append(f"{skip_unsup} غير مدعوم API")
+            if skip_other:
+                skip_bits.append(f"{skip_other} أخرى")
+            if skip_bits:
+                msg += " | تخطي: " + "، ".join(skip_bits)
             add_log(msg, "system", "info")
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
         elif self.path == '/api/panic_all':
             sold_count = 0
+            skip_min = 0
+            skip_unsup = 0
+            skip_other = 0
             for a in shared_state.get("wallet_assets", []):
-                asset = a["asset"]
-                free_qty = float(a["free"])
-                if asset != "USDT" and free_qty > 0:
-                    sym = f"{asset}USDT"
-                    ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
-                    if ok:
-                        sold_count += 1
-                        for bKey in BOT_KEYS:
-                            for p in shared_state["bots"][bKey]["active_positions"].get(sym, []):
-                                database.delete_active_trade(p["id"])
-                            shared_state["bots"][bKey]["active_positions"][sym] = []
-                        for sp in shared_state.get("sniper_positions", []):
-                            if sp["symbol"] == sym:
-                                database.delete_sniper_trade(sp["id"])
-                        shared_state["sniper_positions"] = [sp for sp in shared_state.get("sniper_positions", []) if sp["symbol"] != sym]
-            msg = f"✅ تم تسييل {sold_count} عملات إلى USDT وتصفير كافة الصفقات" if sold_count > 0 else "لا توجد عملات متاحة"
+                asset = a.get("asset")
+                free_qty = float(a.get("free", 0.0) or 0.0)
+                if asset == "USDT" or free_qty <= 0:
+                    continue
+                ok_can, info = can_market_sell_wallet_asset(a, min_notional=MIN_SELL_NOTIONAL_USDT)
+                if not ok_can:
+                    if info == "below_min":
+                        skip_min += 1
+                    elif info == "unsupported":
+                        skip_unsup += 1
+                        add_log(f"⚠️ تخطي {asset}: غير مدعوم عبر API", "system", "warning")
+                    else:
+                        skip_other += 1
+                    continue
+                sym = info
+                ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
+                if ok:
+                    sold_count += 1
+                    for bKey in BOT_KEYS:
+                        for p in shared_state["bots"][bKey]["active_positions"].get(sym, []):
+                            database.delete_active_trade(p["id"])
+                        shared_state["bots"][bKey]["active_positions"][sym] = []
+                    for sp in shared_state.get("sniper_positions", []):
+                        if sp["symbol"] == sym:
+                            database.delete_sniper_trade(sp["id"])
+                    shared_state["sniper_positions"] = [sp for sp in shared_state.get("sniper_positions", []) if sp["symbol"] != sym]
+                else:
+                    err_s = str(res)
+                    if "10007" in err_s or "not support api" in err_s.lower():
+                        skip_unsup += 1
+                    elif "30002" in err_s:
+                        skip_min += 1
+                    else:
+                        skip_other += 1
+            msg = f"✅ تم تسييل {sold_count} عملات إلى USDT وتصفير كافة الصفقات" if sold_count > 0 else "لا توجد عملات قابلة للتسييل (≥1$ ومدعومة API)"
+            skip_bits = []
+            if skip_min:
+                skip_bits.append(f"{skip_min} دون حد 1$")
+            if skip_unsup:
+                skip_bits.append(f"{skip_unsup} غير مدعوم API")
+            if skip_other:
+                skip_bits.append(f"{skip_other} أخرى")
+            if skip_bits:
+                msg += " | تخطي: " + "، ".join(skip_bits)
+            add_log(msg, "system", "info")
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
