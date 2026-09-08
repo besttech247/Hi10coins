@@ -214,10 +214,20 @@ var BOT_DEFS = [
   {key:'BOT_EWO_MTFH', name:'📐 Bot EWO MTFH', tf:'15m', isX:false, isMTF:true, isMTFH:true}
 ];
 
-function buildMtfSettingsHtml(pfx){
+function buildMtfSettingsHtml(pfx, showHierarchy){
   var rows = '';
-  MTF_TF_DEFS.forEach(function(tf){
+  MTF_TF_DEFS.forEach(function(tf, tfIdx){
     var id = pfx + '-mtf-' + tf.key;
+    var hierBlock = '';
+    if(showHierarchy){
+      var opts = '<option value="off">غير مفعّل</option>';
+      for(var i = tfIdx + 1; i < MTF_TF_DEFS.length; i++){
+        opts += '<option value="' + MTF_TF_DEFS[i].key + '">مربوط بـ ' + MTF_TF_DEFS[i].label + '</option>';
+      }
+      hierBlock =
+        '<div><label style="font-size:10px;color:var(--sub)">فلتر هرمي (أب)</label>' +
+        '<select id="' + id + '-hier">' + opts + '</select></div>';
+    }
     rows += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;background:#0b1220">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px">' +
         '<label style="font-size:12px;font-weight:bold"><input type="checkbox" id="' + id + '-en" checked> تفعيل ' + tf.label + '</label>' +
@@ -232,6 +242,7 @@ function buildMtfSettingsHtml(pfx){
         '<div><label style="font-size:10px;color:var(--sub)">Trail CB %</label><input type="number" id="' + id + '-tr-cb" step="0.1"></div>' +
         '<div><label style="font-size:10px;color:var(--sub)">Break-even</label><select id="' + id + '-be-en"><option value="1">مفعّل</option><option value="0">معطّل</option></select></div>' +
         '<div><label style="font-size:10px;color:var(--sub)">Trailing</label><select id="' + id + '-tr-en"><option value="1">مفعّل</option><option value="0">معطّل</option></select></div>' +
+        hierBlock +
       '</div>' +
     '</div>';
   });
@@ -251,7 +262,7 @@ function buildBotMarkup(){
     var settingsBody = '';
     if(b.isMTF){
       var mtfNote = b.isMTFH
-        ? 'EWO + تأكيد هرمي: دخول الفريم الأصغر فقط إذا كانت الفريمات الأعلى المفعّلة داعمة (EWO صاعد أو موجب).'
+        ? 'EWO + فلتر هرمي لكل فريم: اختر أبًا أعلى فقط (مثل 5m→15m/1h/4h/1d). العكس غير مسموح.'
         : 'EWO فقط لكل فريم بشكل مستقل (بدون تأكيد هرمي).';
       settingsBody =
         '<div class="form-row" style="padding-top:8px">' +
@@ -262,7 +273,7 @@ function buildBotMarkup(){
           '<div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label><select id="' + pfx + '-ordtype"><option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option><option value="MARKET">سعر السوق (Market)</option></select></div>' +
         '</div>' +
         '<div style="padding:8px;font-size:9.5px;color:var(--sub)">' + mtfNote + '</div>' +
-        '<div style="padding:0 8px 8px 8px">' + buildMtfSettingsHtml(pfx) + '</div>' +
+        '<div style="padding:0 8px 8px 8px">' + buildMtfSettingsHtml(pfx, !!b.isMTFH) + '</div>' +
         '<div style="padding:0 8px 10px 8px"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg(\'' + b.key + '\', \'' + pfx + '\')">💾 حفظ الإعدادات</button></div>';
     } else {
       var tfBlock =
@@ -482,6 +493,8 @@ async function saveBotCfg(botName, prefix){
         be_enabled: document.getElementById(id+'-be-en').value === '1',
         trail_enabled: document.getElementById(id+'-tr-en').value === '1'
       };
+      var hierEl = document.getElementById(id+'-hier');
+      if(hierEl) mtf[tf.key].hierarchy_parent = hierEl.value || 'off';
     });
     payload.mtf_settings = mtf;
     payload.trade_size_usdt = (mtf['15m'] && mtf['15m'].trade_size_usdt) || 25;
@@ -523,6 +536,7 @@ function fillMtfSettings(prefix, mtf){
     if(document.getElementById(id+'-tr-cb')) document.getElementById(id+'-tr-cb').value = ((cfg.trail_cb_pct || 0)*100).toFixed(1);
     if(document.getElementById(id+'-be-en')) document.getElementById(id+'-be-en').value = cfg.be_enabled ? '1' : '0';
     if(document.getElementById(id+'-tr-en')) document.getElementById(id+'-tr-en').value = cfg.trail_enabled ? '1' : '0';
+    if(document.getElementById(id+'-hier')) document.getElementById(id+'-hier').value = cfg.hierarchy_parent || 'off';
   });
 }
 

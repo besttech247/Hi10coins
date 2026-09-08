@@ -154,6 +154,125 @@ def bot_entries_allowed(bot_state):
         return False, "loss_limit"
     return True, None
 
+def _fmt_setting_val(v):
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    if isinstance(v, bool):
+        return "on" if v else "off"
+    return str(v)
+
+def summarize_bot_config_changes(bot_name, before, after):
+    """Build detailed Arabic change lines for the live log."""
+    lines = []
+    label_map = {
+        "max_allocation_usdt": "سقف رأس المال",
+        "max_concurrent_per_coin": "أقصى صفقات/عملة",
+        "trade_size_usdt": "حجم الصفقة",
+        "order_exec_type": "نوع الأمر",
+        "timeframe": "الفريم",
+        "tp_pct": "TP",
+        "sl_pct": "SL",
+        "trailing_stop": "Trailing",
+        "trailing_cb": "Trailing CB",
+        "daily_profit_target": "هدف ربح يومي",
+        "daily_loss_limit": "حد خسارة يومي",
+        "status": "الحالة",
+        "symbols": "الرموز",
+    }
+    for key, label in label_map.items():
+        if key not in after:
+            continue
+        old = before.get(key)
+        new = after.get(key)
+        if old is None and new is None:
+            continue
+        try:
+            if isinstance(new, (int, float)) or isinstance(old, (int, float)):
+                if float(old or 0) == float(new or 0):
+                    continue
+            elif str(old) == str(new):
+                continue
+        except Exception:
+            if str(old) == str(new):
+                continue
+        # Show percents more readably for tp/sl/cb
+        if key in ("tp_pct", "sl_pct", "trailing_cb") and new is not None:
+            try:
+                old_s = f"{float(old or 0)*100:.2f}%"
+                new_s = f"{float(new)*100:.2f}%"
+            except Exception:
+                old_s, new_s = _fmt_setting_val(old), _fmt_setting_val(new)
+        else:
+            old_s, new_s = _fmt_setting_val(old), _fmt_setting_val(new)
+        lines.append(f"{label}: {old_s} → {new_s}")
+
+    old_mtf = before.get("mtf_settings") if isinstance(before.get("mtf_settings"), dict) else {}
+    new_mtf = after.get("mtf_settings") if isinstance(after.get("mtf_settings"), dict) else {}
+    if new_mtf:
+        old_g = (old_mtf or {}).get("_global") or {}
+        new_g = new_mtf.get("_global") or {}
+        for gk, glabel in (
+            ("max_open_positions", "أقصى صفقات مفتوحة"),
+            ("be_offset", "BE offset"),
+            ("ewo_exit_min_profit", "EWO exit min"),
+        ):
+            if gk in new_g and float(old_g.get(gk, -1) or -1) != float(new_g.get(gk) or 0):
+                if gk in ("be_offset", "ewo_exit_min_profit"):
+                    lines.append(f"{glabel}: {float(old_g.get(gk, 0))*100:.2f}% → {float(new_g.get(gk, 0))*100:.2f}%")
+                else:
+                    lines.append(f"{glabel}: {old_g.get(gk)} → {new_g.get(gk)}")
+
+        for tf in MTF_TF_ORDER:
+            o = (old_mtf or {}).get(tf) or {}
+            n = new_mtf.get(tf) or {}
+            if not n:
+                continue
+            tf_lab = MTF_TF_LABELS.get(tf, tf)
+            checks = [
+                ("enabled", "تفعيل"),
+                ("trade_size_usdt", "حجم"),
+                ("tp_pct", "TP"),
+                ("sl_pct", "SL"),
+                ("be_enabled", "BE"),
+                ("be_trigger_pct", "BE@"),
+                ("trail_enabled", "Trail"),
+                ("trail_trigger_pct", "Trail@"),
+                ("trail_cb_pct", "TrailCB"),
+                ("hierarchy_parent", "فلتر هرمي"),
+            ]
+            for ck, clabel in checks:
+                if ck not in n:
+                    continue
+                ov, nv = o.get(ck), n.get(ck)
+                changed = False
+                if ck in ("tp_pct", "sl_pct", "be_trigger_pct", "trail_trigger_pct", "trail_cb_pct"):
+                    try:
+                        changed = abs(float(ov or 0) - float(nv or 0)) > 1e-12
+                    except Exception:
+                        changed = str(ov) != str(nv)
+                elif ck == "hierarchy_parent":
+                    changed = database.normalize_hierarchy_parent(tf, ov) != database.normalize_hierarchy_parent(tf, nv)
+                else:
+                    changed = ov != nv
+                if not changed:
+                    continue
+                if ck == "hierarchy_parent":
+                    old_p = database.normalize_hierarchy_parent(tf, ov)
+                    new_p = database.normalize_hierarchy_parent(tf, nv)
+                    old_s = "off" if old_p == "off" else MTF_TF_LABELS.get(old_p, old_p)
+                    new_s = "off" if new_p == "off" else MTF_TF_LABELS.get(new_p, new_p)
+                    lines.append(f"[{tf_lab}] {clabel}: {old_s} → {new_s}")
+                elif ck in ("tp_pct", "sl_pct", "be_trigger_pct", "trail_trigger_pct", "trail_cb_pct"):
+                    lines.append(f"[{tf_lab}] {clabel}: {float(ov or 0)*100:.2f}% → {float(nv or 0)*100:.2f}%")
+                elif ck in ("enabled", "be_enabled", "trail_enabled"):
+                    lines.append(f"[{tf_lab}] {clabel}: {'on' if ov else 'off'} → {'on' if nv else 'off'}")
+                else:
+                    lines.append(f"[{tf_lab}] {clabel}: {ov} → {nv}")
+
+    if not lines:
+        return [f"تم حفظ إعدادات {bot_name} (بدون تغيير ملحوظ)"]
+    return [f"تم حفظ إعدادات {bot_name}:"] + lines
+
 def fetch_server_ip():
     try:
         req = urllib.request.Request("https://api.ipify.org?format=json", headers={'User-Agent': 'Mozilla/5.0'})
@@ -376,21 +495,17 @@ def mtf_tf_supportive(candles):
 
 def mtf_hierarchy_ok(symbol, entry_tf, mtf_settings):
     """
-    Hierarchical confirm for MTFH: entry on a smaller TF only if every
-    higher *enabled* timeframe is supportive. Highest enabled TF needs no parent.
+    MTFH confirm: entry TF checks only its configured hierarchy_parent
+    (off, or one strictly higher TF such as 15m/30m/60m/4h/1d).
     """
-    try:
-        idx = MTF_TF_ORDER.index(entry_tf)
-    except ValueError:
+    tf_cfg = mtf_settings.get(entry_tf) or {}
+    parent = database.normalize_hierarchy_parent(entry_tf, tf_cfg.get("hierarchy_parent", "off"))
+    if parent == "off":
+        return True
+    candles = fetch_klines(symbol, interval=parent, limit=45)
+    if not candles:
         return False
-    for htf in MTF_TF_ORDER[idx + 1:]:
-        tf_cfg = mtf_settings.get(htf) or {}
-        if not tf_cfg.get("enabled"):
-            continue
-        candles = fetch_klines(symbol, interval=htf, limit=45)
-        if not candles or not mtf_tf_supportive(candles):
-            return False
-    return True
+    return mtf_tf_supportive(candles)
 
 def get_mtf_settings(cfg_or_bot=None):
     if isinstance(cfg_or_bot, dict) and cfg_or_bot.get("mtf_settings"):
@@ -1302,6 +1417,7 @@ def trading_engine_loop():
                             fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
                             tp_pct = float(tf_cfg.get("tp_pct", 0.022))
                             sl_pct = float(tf_cfg.get("sl_pct", 0.010))
+                            hier_parent = database.normalize_hierarchy_parent(tf, tf_cfg.get("hierarchy_parent", "off")) if hierarchical else "off"
                             meta = {
                                 "timeframe": tf,
                                 "trade_size_usdt": size,
@@ -1315,6 +1431,7 @@ def trading_engine_loop():
                                 "be_armed": False,
                                 "trail_armed": False,
                                 "hierarchical": hierarchical,
+                                "hierarchy_parent": hier_parent,
                                 "entry_fee_rate": entry_fee
                             }
                             t_obj = {
@@ -1332,7 +1449,10 @@ def trading_engine_loop():
                             })
                             open_count += 1
                             used_cap += size
-                            mode_tag = "H+" if hierarchical else ""
+                            mode_tag = ""
+                            if hierarchical:
+                                parent_lab = "off" if hier_parent == "off" else MTF_TF_LABELS.get(hier_parent, hier_parent)
+                                mode_tag = f" H→{parent_lab}"
                             add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {fill_entry}$ بحجم {size}$ ({exec_type})", "buys", "primary")
 
         except Exception as e:
@@ -1746,8 +1866,19 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == '/api/save_bot_config':
             b_name = data.pop("bot_name", "BOT_1")
+            before = database.get_bot_config(b_name) or {}
+            # Normalize MTF hierarchy parents before save
+            if isinstance(data.get("mtf_settings"), dict):
+                data["mtf_settings"] = database.parse_mtf_settings(data.get("mtf_settings"))
             database.update_bot_config(b_name, data)
-            add_log(f"تم حفظ إعدادات {b_name}", "system", "info")
+            after = database.get_bot_config(b_name) or {}
+            # Prefer request payload values for change summary when present
+            merged_after = dict(after)
+            merged_after.update(data)
+            if "mtf_settings" in data:
+                merged_after["mtf_settings"] = data["mtf_settings"]
+            for line in summarize_bot_config_changes(b_name, before, merged_after):
+                add_log(line, "system", "info")
             self.send_response(200); self.end_headers()
 
         elif self.path == '/api/add_symbol':

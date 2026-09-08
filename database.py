@@ -12,13 +12,32 @@ DEFAULT_MTF_SETTINGS = {
         "be_offset": 0.001,
         "ewo_exit_min_profit": 0.008
     },
-    "5m":  {"enabled": True,  "trade_size_usdt": 15,  "sl_pct": 0.008, "tp_pct": 0.015, "be_enabled": False, "be_trigger_pct": 0.010, "trail_enabled": False, "trail_trigger_pct": 0.018, "trail_cb_pct": 0.006},
-    "15m": {"enabled": True,  "trade_size_usdt": 25,  "sl_pct": 0.010, "tp_pct": 0.022, "be_enabled": True,  "be_trigger_pct": 0.012, "trail_enabled": True,  "trail_trigger_pct": 0.018, "trail_cb_pct": 0.006},
-    "30m": {"enabled": True,  "trade_size_usdt": 35,  "sl_pct": 0.012, "tp_pct": 0.028, "be_enabled": True,  "be_trigger_pct": 0.015, "trail_enabled": True,  "trail_trigger_pct": 0.022, "trail_cb_pct": 0.007},
-    "60m": {"enabled": True,  "trade_size_usdt": 50,  "sl_pct": 0.014, "tp_pct": 0.035, "be_enabled": True,  "be_trigger_pct": 0.018, "trail_enabled": True,  "trail_trigger_pct": 0.028, "trail_cb_pct": 0.008},
-    "4h":  {"enabled": True,  "trade_size_usdt": 70,  "sl_pct": 0.018, "tp_pct": 0.045, "be_enabled": True,  "be_trigger_pct": 0.022, "trail_enabled": True,  "trail_trigger_pct": 0.035, "trail_cb_pct": 0.010},
-    "1d":  {"enabled": False, "trade_size_usdt": 100, "sl_pct": 0.025, "tp_pct": 0.060, "be_enabled": True,  "be_trigger_pct": 0.030, "trail_enabled": True,  "trail_trigger_pct": 0.045, "trail_cb_pct": 0.012}
+    # hierarchy_parent: "off" or a strictly higher TF key (5m/15m/30m/60m/4h/1d). Used by MTFH only.
+    "5m":  {"enabled": True,  "trade_size_usdt": 15,  "sl_pct": 0.008, "tp_pct": 0.015, "be_enabled": False, "be_trigger_pct": 0.010, "trail_enabled": False, "trail_trigger_pct": 0.018, "trail_cb_pct": 0.006, "hierarchy_parent": "off"},
+    "15m": {"enabled": True,  "trade_size_usdt": 25,  "sl_pct": 0.010, "tp_pct": 0.022, "be_enabled": True,  "be_trigger_pct": 0.012, "trail_enabled": True,  "trail_trigger_pct": 0.018, "trail_cb_pct": 0.006, "hierarchy_parent": "off"},
+    "30m": {"enabled": True,  "trade_size_usdt": 35,  "sl_pct": 0.012, "tp_pct": 0.028, "be_enabled": True,  "be_trigger_pct": 0.015, "trail_enabled": True,  "trail_trigger_pct": 0.022, "trail_cb_pct": 0.007, "hierarchy_parent": "off"},
+    "60m": {"enabled": True,  "trade_size_usdt": 50,  "sl_pct": 0.014, "tp_pct": 0.035, "be_enabled": True,  "be_trigger_pct": 0.018, "trail_enabled": True,  "trail_trigger_pct": 0.028, "trail_cb_pct": 0.008, "hierarchy_parent": "off"},
+    "4h":  {"enabled": True,  "trade_size_usdt": 70,  "sl_pct": 0.018, "tp_pct": 0.045, "be_enabled": True,  "be_trigger_pct": 0.022, "trail_enabled": True,  "trail_trigger_pct": 0.035, "trail_cb_pct": 0.010, "hierarchy_parent": "off"},
+    "1d":  {"enabled": False, "trade_size_usdt": 100, "sl_pct": 0.025, "tp_pct": 0.060, "be_enabled": True,  "be_trigger_pct": 0.030, "trail_enabled": True,  "trail_trigger_pct": 0.045, "trail_cb_pct": 0.012, "hierarchy_parent": "off"}
 }
+
+MTF_TF_ORDER = ["5m", "15m", "30m", "60m", "4h", "1d"]
+MTF_TF_LABELS = {"5m": "5m", "15m": "15m", "30m": "30m", "60m": "1h", "4h": "4h", "1d": "1d"}
+
+
+def normalize_hierarchy_parent(entry_tf, parent):
+    """Allow only off or a strictly higher timeframe than entry_tf."""
+    raw = str(parent or "off").strip().lower()
+    if raw in ("", "off", "none", "disabled", "0"):
+        return "off"
+    if raw == "1h":
+        raw = "60m"
+    try:
+        idx = MTF_TF_ORDER.index(entry_tf)
+    except ValueError:
+        return "off"
+    higher = MTF_TF_ORDER[idx + 1:]
+    return raw if raw in higher else "off"
 
 
 def _resolve_db_file():
@@ -64,6 +83,9 @@ def _ensure_column(cursor, table, column, col_def):
 def parse_mtf_settings(raw):
     settings = json.loads(json.dumps(DEFAULT_MTF_SETTINGS))
     if not raw:
+        for tf in MTF_TF_ORDER:
+            if tf in settings:
+                settings[tf]["hierarchy_parent"] = normalize_hierarchy_parent(tf, settings[tf].get("hierarchy_parent", "off"))
         return settings
     try:
         data = json.loads(raw) if isinstance(raw, str) else dict(raw)
@@ -78,6 +100,9 @@ def parse_mtf_settings(raw):
             if tf not in settings:
                 settings[tf] = {}
             settings[tf].update(cfg)
+    for tf in MTF_TF_ORDER:
+        if tf in settings and isinstance(settings[tf], dict):
+            settings[tf]["hierarchy_parent"] = normalize_hierarchy_parent(tf, settings[tf].get("hierarchy_parent", "off"))
     return settings
 
 
