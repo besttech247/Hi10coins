@@ -28,10 +28,12 @@ START_TIME = time.time()
 
 SYMBOL_RULES = {}
 LAST_ENTRY_CANDLE = {}
-BOT_KEYS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C", "BOT_X1", "BOT_X2", "BOT_X3", "BOT_EWO_MTF"]
-CLASSIC_BOTS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C"]
+BOT_KEYS = ["BOT_1", "BOT_X1", "BOT_X2", "BOT_X3", "BOT_EWO_MTF", "BOT_EWO_MTFH"]
+CLASSIC_BOTS = ["BOT_1"]
 EXPERIMENTAL_BOTS = ["BOT_X1", "BOT_X2", "BOT_X3"]
 MTF_BOT = "BOT_EWO_MTF"
+MTFH_BOT = "BOT_EWO_MTFH"
+MTF_BOTS = [MTF_BOT, MTFH_BOT]
 MTF_TF_ORDER = ["5m", "15m", "30m", "60m", "4h", "1d"]
 MTF_TF_LABELS = {"5m": "5m", "15m": "15m", "30m": "30m", "60m": "1h", "4h": "4h", "1d": "1d"}
 
@@ -54,20 +56,21 @@ shared_state = {
 }
 
 for k in BOT_KEYS:
+    is_mtf = k in MTF_BOTS
     shared_state["bots"][k] = {
         "name": k,
         "status": "PAUSED",
         "symbols": [],
         "order_exec_type": "CHASE_LIMIT",
-        "max_allocation": 300.0 if k == MTF_BOT else 50.0,
-        "max_concurrent": 2 if k == MTF_BOT else 1,
-        "trade_size": 15.0 if k == MTF_BOT else 10.0,
+        "max_allocation": 300.0 if is_mtf else 50.0,
+        "max_concurrent": 2 if is_mtf else 1,
+        "trade_size": 15.0 if is_mtf else 10.0,
         "tp_pct": 2.5,
         "sl_pct": 1.2,
         "timeframe": "15m",
-        "trailing_stop": 1 if (k in EXPERIMENTAL_BOTS or k == MTF_BOT) else 0,
+        "trailing_stop": 1 if (k in EXPERIMENTAL_BOTS or is_mtf) else 0,
         "trailing_cb": 0.006,
-        "mtf_settings": database.DEFAULT_MTF_SETTINGS if k == MTF_BOT else {},
+        "mtf_settings": database.DEFAULT_MTF_SETTINGS if is_mtf else {},
         "daily_pnl": 0.0,
         "daily_target": 5.0,
         "trades_count": 0,
@@ -328,6 +331,31 @@ def ewo_rebound_signal(candles):
     if e1 is None or e2 is None or e3 is None:
         return False, (None, None, None)
     return (e1 < 0 and e1 > e2 and e2 <= e3), (e3, e2, e1)
+
+def mtf_tf_supportive(candles):
+    """Higher-TF trend support: rising EWO or already positive."""
+    e3, e2, e1 = calculate_ewo(candles)
+    if e1 is None or e2 is None:
+        return False
+    return (e1 >= e2) or (e1 > 0)
+
+def mtf_hierarchy_ok(symbol, entry_tf, mtf_settings):
+    """
+    Hierarchical confirm for MTFH: entry on a smaller TF only if every
+    higher *enabled* timeframe is supportive. Highest enabled TF needs no parent.
+    """
+    try:
+        idx = MTF_TF_ORDER.index(entry_tf)
+    except ValueError:
+        return False
+    for htf in MTF_TF_ORDER[idx + 1:]:
+        tf_cfg = mtf_settings.get(htf) or {}
+        if not tf_cfg.get("enabled"):
+            continue
+        candles = fetch_klines(symbol, interval=htf, limit=45)
+        if not candles or not mtf_tf_supportive(candles):
+            return False
+    return True
 
 def get_mtf_settings(cfg_or_bot=None):
     if isinstance(cfg_or_bot, dict) and cfg_or_bot.get("mtf_settings"):
@@ -678,10 +706,10 @@ def trading_engine_loop():
                 shared_state["bots"][bKey]["tp_pct"] = float(cfg.get("tp_pct", 0.025)) * 100.0
                 shared_state["bots"][bKey]["sl_pct"] = float(cfg.get("sl_pct", 0.012)) * 100.0
                 shared_state["bots"][bKey]["timeframe"] = cfg.get("timeframe", "15m")
-                shared_state["bots"][bKey]["trailing_stop"] = int(cfg.get("trailing_stop", 1 if bKey in EXPERIMENTAL_BOTS or bKey == MTF_BOT else 0))
+                shared_state["bots"][bKey]["trailing_stop"] = int(cfg.get("trailing_stop", 1 if bKey in EXPERIMENTAL_BOTS or bKey in MTF_BOTS else 0))
                 shared_state["bots"][bKey]["trailing_cb"] = float(cfg.get("trailing_cb", 0.006))
                 shared_state["bots"][bKey]["symbols"] = syms
-                if bKey == MTF_BOT:
+                if bKey in MTF_BOTS:
                     shared_state["bots"][bKey]["mtf_settings"] = get_mtf_settings(cfg)
                     shared_state["bots"][bKey]["max_allocation"] = float(cfg.get("max_allocation_usdt", 300.0))
 
@@ -931,8 +959,9 @@ def trading_engine_loop():
                                         current_used_cap += size
                                         add_log(f"🧪 [{bKey}] شراء {sym} عند {ask}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
 
-                    elif bKey == MTF_BOT:
-                        bot_state = shared_state["bots"][MTF_BOT]
+                    elif bKey in MTF_BOTS:
+                        bot_state = shared_state["bots"][bKey]
+                        hierarchical = (bKey == MTFH_BOT)
                         mtf = get_mtf_settings(cfg if cfg.get("mtf_settings") else bot_state)
                         gcfg = mtf.get("_global", {})
                         max_open = int(gcfg.get("max_open_positions", 4))
@@ -1040,14 +1069,14 @@ def trading_engine_loop():
                                     if net_pnl > 0:
                                         bot_state["winning_count"] += 1
                                     database.archive_closed_trade({
-                                        "id": pos["id"], "bot_name": MTF_BOT, "symbol": sym,
+                                        "id": pos["id"], "bot_name": bKey, "symbol": sym,
                                         "entry_price": entry, "exit_price": real_exit,
                                         "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                         "net_pnl": net_pnl, "reason": f"{reason} [{MTF_TF_LABELS.get(tf, tf)}]",
                                         "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
                                     database.delete_active_trade(pos["id"])
-                                    add_log(f"💰 [{MTF_BOT}][{MTF_TF_LABELS.get(tf, tf)}] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    add_log(f"💰 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                     open_count = max(0, open_count - 1)
                                     used_cap = max(0.0, used_cap - position_notional(pos))
                                 else:
@@ -1092,12 +1121,15 @@ def trading_engine_loop():
                             if not candles:
                                 continue
                             latest_candle_time = candles[-1]["time"]
-                            lock_key = f"{MTF_BOT}_{sym}_{tf}"
+                            lock_key = f"{bKey}_{sym}_{tf}"
                             if LAST_ENTRY_CANDLE.get(lock_key) == latest_candle_time:
                                 continue
 
                             ok_sig, _ewo = ewo_rebound_signal(candles)
                             if not ok_sig:
+                                continue
+
+                            if hierarchical and not mtf_hierarchy_ok(sym, tf, mtf):
                                 continue
 
                             q = float(format_quantity(sym, size / ask))
@@ -1111,7 +1143,8 @@ def trading_engine_loop():
                                 continue
 
                             LAST_ENTRY_CANDLE[lock_key] = latest_candle_time
-                            trade_id = f"bot_ewo_mtf_{tf}_{int(time.time()*1000)}"
+                            id_pfx = "bot_ewo_mtfh" if hierarchical else "bot_ewo_mtf"
+                            trade_id = f"{id_pfx}_{tf}_{int(time.time()*1000)}"
                             time_str = get_current_iso_time()
                             tp_pct = float(tf_cfg.get("tp_pct", 0.022))
                             sl_pct = float(tf_cfg.get("sl_pct", 0.010))
@@ -1126,10 +1159,11 @@ def trading_engine_loop():
                                 "trail_trigger_pct": float(tf_cfg.get("trail_trigger_pct", 0.018)),
                                 "trail_cb_pct": float(tf_cfg.get("trail_cb_pct", 0.006)),
                                 "be_armed": False,
-                                "trail_armed": False
+                                "trail_armed": False,
+                                "hierarchical": hierarchical
                             }
                             t_obj = {
-                                "id": trade_id, "bot_name": MTF_BOT, "symbol": sym,
+                                "id": trade_id, "bot_name": bKey, "symbol": sym,
                                 "entry_price": ask, "highest_price": ask, "qty": q,
                                 "tp_pct": tp_pct, "sl_pct": sl_pct, "time_str": time_str,
                                 "timeframe": tf, "meta": meta
@@ -1142,7 +1176,8 @@ def trading_engine_loop():
                             })
                             open_count += 1
                             used_cap += size
-                            add_log(f"📐 [{MTF_BOT}][{MTF_TF_LABELS.get(tf, tf)}] شراء {sym} عند {ask}$ بحجم {size}$ ({exec_type})", "buys", "primary")
+                            mode_tag = "H+" if hierarchical else ""
+                            add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {ask}$ بحجم {size}$ ({exec_type})", "buys", "primary")
 
         except Exception as e:
             add_log(f"خطأ محرك التداول: {e}", "system", "warning")

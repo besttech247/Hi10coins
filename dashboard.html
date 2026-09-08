@@ -93,13 +93,11 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
 
   <div class="tabs">
     <button class="tab active" onclick="showTab('t-bot_1', this)">🤖 Bot 1</button>
-    <button class="tab" onclick="showTab('t-bot_2a', this)">⚡ Bot 2A</button>
-    <button class="tab" onclick="showTab('t-bot_2b', this)">⚡ Bot 2B</button>
-    <button class="tab" onclick="showTab('t-bot_2c', this)">⚡ Bot 2C</button>
     <button class="tab" onclick="showTab('t-bot_x1', this)">🧪 X1</button>
     <button class="tab" onclick="showTab('t-bot_x2', this)">🧪 X2</button>
     <button class="tab" onclick="showTab('t-bot_x3', this)">🧪 X3</button>
     <button class="tab" onclick="showTab('t-bot_ewo_mtf', this)">📐 MTF</button>
+    <button class="tab" onclick="showTab('t-bot_ewo_mtfh', this)">📐 MTFH</button>
     <button class="tab" onclick="showTab('t-w', this)">💰 المحفظة</button>
   </div>
 
@@ -206,14 +204,12 @@ var MTF_TF_DEFS = [
 ];
 
 var BOT_DEFS = [
-  {key:'BOT_1', name:'🤖 Bot 1 (EWO 5m)', tf:'5m', isX:false, isMTF:false},
-  {key:'BOT_2A', name:'⚡ Bot 2A (Scalp 15m)', tf:'15m', isX:false, isMTF:false},
-  {key:'BOT_2B', name:'⚡ Bot 2B (Swing 1h)', tf:'60m', isX:false, isMTF:false},
-  {key:'BOT_2C', name:'⚡ Bot 2C (Custom TF)', tf:'5m', isX:false, isMTF:false},
-  {key:'BOT_X1', name:'🧪 Bot X1 (سريع 5m)', tf:'5m', isX:true, isMTF:false},
-  {key:'BOT_X2', name:'🧪 Bot X2 (قياسي 15m)', tf:'15m', isX:true, isMTF:false},
-  {key:'BOT_X3', name:'🧪 Bot X3 (أوسع 15m)', tf:'15m', isX:true, isMTF:false},
-  {key:'BOT_EWO_MTF', name:'📐 Bot EWO MTF', tf:'15m', isX:false, isMTF:true}
+  {key:'BOT_1', name:'🤖 Bot 1 (EWO 5m)', tf:'5m', isX:false, isMTF:false, isMTFH:false},
+  {key:'BOT_X1', name:'🧪 Bot X1 (سريع 5m)', tf:'5m', isX:true, isMTF:false, isMTFH:false},
+  {key:'BOT_X2', name:'🧪 Bot X2 (قياسي 15m)', tf:'15m', isX:true, isMTF:false, isMTFH:false},
+  {key:'BOT_X3', name:'🧪 Bot X3 (أوسع 15m)', tf:'15m', isX:true, isMTF:false, isMTFH:false},
+  {key:'BOT_EWO_MTF', name:'📐 Bot EWO MTF', tf:'15m', isX:false, isMTF:true, isMTFH:false},
+  {key:'BOT_EWO_MTFH', name:'📐 Bot EWO MTFH', tf:'15m', isX:false, isMTF:true, isMTFH:true}
 ];
 
 function buildMtfSettingsHtml(pfx){
@@ -252,6 +248,9 @@ function buildBotMarkup(){
     var activeCls = (idx === 0) ? 'active' : '';
     var settingsBody = '';
     if(b.isMTF){
+      var mtfNote = b.isMTFH
+        ? 'EWO + تأكيد هرمي: دخول الفريم الأصغر فقط إذا كانت الفريمات الأعلى المفعّلة داعمة (EWO صاعد أو موجب).'
+        : 'EWO فقط لكل فريم بشكل مستقل (بدون تأكيد هرمي).';
       settingsBody =
         '<div class="form-row" style="padding-top:8px">' +
           '<div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="' + pfx + '-alloc" value="300"></div>' +
@@ -259,7 +258,7 @@ function buildBotMarkup(){
           '<div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label><select id="' + pfx + '-ordtype"><option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option><option value="MARKET">سعر السوق (Market)</option></select></div>' +
           '<div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg(\'' + b.key + '\', \'' + pfx + '\')">💾 حفظ</button></div>' +
         '</div>' +
-        '<div style="padding:8px;font-size:9.5px;color:var(--sub)">EWO فقط لكل فريم بشكل مستقل. التأكيد الهرمي مؤجّل.</div>' +
+        '<div style="padding:8px;font-size:9.5px;color:var(--sub)">' + mtfNote + '</div>' +
         '<div style="padding:0 8px 8px 8px">' + buildMtfSettingsHtml(pfx) + '</div>';
     } else {
       var tfBlock =
