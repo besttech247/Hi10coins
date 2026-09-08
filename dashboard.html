@@ -533,8 +533,8 @@ async function update(){
       document.getElementById('server-ip-val').innerText = d.server_public_ip;
     }
 
-    document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + ' $';
-    document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0.0).toFixed(2) + ' $';
+    document.getElementById('live-usdt').innerText = (d.real_balance_usdt || 0.0).toFixed(2) + '$';
+    document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0.0).toFixed(2) + '$';
     
     var livePnlVal = d.total_live_pnl || 0.0;
     var pnlEl = document.getElementById('total-live-pnl-val');
