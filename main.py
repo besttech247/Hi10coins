@@ -614,10 +614,30 @@ def resolve_fill(res, qty_hint=None, price_fallback=None):
         return quote / filled, filled
     return fallback_px, filled if filled > 0 else hint_qty
 
+def clean_price(price, decimals=8):
+    """Remove binary float noise while keeping exchange-relevant precision."""
+    try:
+        return float(f"{float(price):.{int(decimals)}f}")
+    except (TypeError, ValueError):
+        return price
+
+def clean_qty(qty, decimals=8):
+    try:
+        return float(f"{float(qty):.{int(decimals)}f}")
+    except (TypeError, ValueError):
+        return qty
+
+def fmt_usd(price, decimals=8):
+    try:
+        s = f"{clean_price(price, decimals):.{int(decimals)}f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+    except (TypeError, ValueError):
+        return str(price)
+
 def build_entry_from_fill(res, price_fallback, qty_hint, exec_type):
     avg, filled = resolve_fill(res, qty_hint=qty_hint, price_fallback=price_fallback)
-    entry = float(avg if avg is not None else price_fallback)
-    qty = float(filled if filled and filled > 0 else qty_hint)
+    entry = clean_price(avg if avg is not None else price_fallback)
+    qty = clean_qty(filled if filled and filled > 0 else qty_hint)
     return entry, qty, resolve_fee_rate(exec_type, res)
 
 def position_entry_fee_rate(pos, fallback_exec_type=None):
