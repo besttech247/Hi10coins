@@ -168,16 +168,30 @@ def init_db():
 
     default_3_symbols = "SOLUSDT, BTCUSDT, ETHUSDT"
 
-    # Remove deprecated Bot 3 before inserting replacements.
+    # Remove deprecated bots before seeding replacements.
     cursor.execute("DELETE FROM bots_config WHERE bot_name = 'BOT_3'")
     cursor.execute("DELETE FROM active_trades WHERE bot_name = 'BOT_3'")
+
+    # Migrate legacy single BOT_X -> BOT_X1 safely
+    cursor.execute("SELECT id FROM bots_config WHERE bot_name = 'BOT_X1'")
+    has_x1 = cursor.fetchone() is not None
+    cursor.execute("SELECT id FROM bots_config WHERE bot_name = 'BOT_X'")
+    has_x = cursor.fetchone() is not None
+    if has_x and not has_x1:
+        cursor.execute("UPDATE bots_config SET bot_name = 'BOT_X1', display_name = '🧪 Bot X1 (سريع 5m)' WHERE bot_name = 'BOT_X'")
+    elif has_x and has_x1:
+        cursor.execute("DELETE FROM bots_config WHERE bot_name = 'BOT_X'")
+    cursor.execute("UPDATE active_trades SET bot_name = 'BOT_X1' WHERE bot_name = 'BOT_X'")
+    cursor.execute("UPDATE closed_trades SET bot_name = 'BOT_X1' WHERE bot_name = 'BOT_X'")
 
     bots = [
         (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.025, 0.012, 0, 'PAUSED'),
         (2, 'BOT_2A', '⚡ Bot 2A (Scalp 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.012, 0, 'PAUSED'),
         (3, 'BOT_2B', '⚡ Bot 2B (Swing 1h)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '60m', 0.035, 0.015, 0, 'PAUSED'),
         (4, 'BOT_2C', '⚡ Bot 2C (Custom TF)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.020, 0.010, 0, 'PAUSED'),
-        (5, 'BOT_X', '🧪 Bot X (تجريبي محسّن)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.010, 1, 'PAUSED')
+        (5, 'BOT_X1', '🧪 Bot X1 (سريع 5m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.015, 0.008, 1, 'PAUSED'),
+        (6, 'BOT_X2', '🧪 Bot X2 (قياسي 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.010, 1, 'PAUSED'),
+        (7, 'BOT_X3', '🧪 Bot X3 (أوسع 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.035, 0.012, 1, 'PAUSED')
     ]
 
     for b in bots:
@@ -186,21 +200,27 @@ def init_db():
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, b)
 
-    # If BOT_X missing (e.g. id=5 was occupied previously), insert by bot_name only.
-    cursor.execute("SELECT id FROM bots_config WHERE bot_name = 'BOT_X'")
-    if cursor.fetchone() is None:
+    x_defaults = [
+        ('BOT_X1', '🧪 Bot X1 (سريع 5m)', '5m', 0.015, 0.008, 0.005),
+        ('BOT_X2', '🧪 Bot X2 (قياسي 15m)', '15m', 0.025, 0.010, 0.006),
+        ('BOT_X3', '🧪 Bot X3 (أوسع 15m)', '15m', 0.035, 0.012, 0.008),
+    ]
+    for name, display, tf, tp, sl, cb in x_defaults:
+        cursor.execute("SELECT id FROM bots_config WHERE bot_name = ?", (name,))
+        if cursor.fetchone() is None:
+            cursor.execute("""
+            INSERT INTO bots_config (bot_name, display_name, symbols, order_exec_type, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, trailing_cb, status)
+            VALUES (?, ?, ?, 'CHASE_LIMIT', 50.0, 1, 10.0, ?, ?, ?, 1, ?, 'PAUSED')
+            """, (name, display, default_3_symbols, tf, tp, sl, cb))
         cursor.execute("""
-        INSERT INTO bots_config (bot_name, display_name, symbols, order_exec_type, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, trailing_cb, status)
-        VALUES ('BOT_X', '🧪 Bot X (تجريبي محسّن)', ?, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.010, 1, 0.006, 'PAUSED')
-        """, (default_3_symbols,))
+        UPDATE bots_config
+        SET display_name = ?,
+            trailing_stop = 1,
+            trailing_cb = COALESCE(trailing_cb, ?)
+        WHERE bot_name = ?
+        """, (display, cb, name))
 
-    cursor.execute("""
-    UPDATE bots_config
-    SET display_name = '🧪 Bot X (تجريبي محسّن)',
-        trailing_stop = 1,
-        trailing_cb = COALESCE(trailing_cb, 0.006)
-    WHERE bot_name = 'BOT_X'
-    """)
+    cursor.execute("DELETE FROM bots_config WHERE bot_name = 'BOT_X'")
 
     conn.commit()
     conn.close()

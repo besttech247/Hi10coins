@@ -28,8 +28,9 @@ START_TIME = time.time()
 
 SYMBOL_RULES = {}
 LAST_ENTRY_CANDLE = {}
-BOT_KEYS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C", "BOT_X"]
+BOT_KEYS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C", "BOT_X1", "BOT_X2", "BOT_X3"]
 CLASSIC_BOTS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C"]
+EXPERIMENTAL_BOTS = ["BOT_X1", "BOT_X2", "BOT_X3"]
 
 shared_state = {
     "api_connected": False,
@@ -61,7 +62,7 @@ for k in BOT_KEYS:
         "tp_pct": 2.5,
         "sl_pct": 1.2,
         "timeframe": "15m",
-        "trailing_stop": 1 if k == "BOT_X" else 0,
+        "trailing_stop": 1 if k in EXPERIMENTAL_BOTS else 0,
         "trailing_cb": 0.006,
         "daily_pnl": 0.0,
         "daily_target": 5.0,
@@ -649,7 +650,7 @@ def trading_engine_loop():
                 shared_state["bots"][bKey]["tp_pct"] = float(cfg.get("tp_pct", 0.025)) * 100.0
                 shared_state["bots"][bKey]["sl_pct"] = float(cfg.get("sl_pct", 0.012)) * 100.0
                 shared_state["bots"][bKey]["timeframe"] = cfg.get("timeframe", "15m")
-                shared_state["bots"][bKey]["trailing_stop"] = int(cfg.get("trailing_stop", 1 if bKey == "BOT_X" else 0))
+                shared_state["bots"][bKey]["trailing_stop"] = int(cfg.get("trailing_stop", 1 if bKey in EXPERIMENTAL_BOTS else 0))
                 shared_state["bots"][bKey]["trailing_cb"] = float(cfg.get("trailing_cb", 0.006))
                 shared_state["bots"][bKey]["symbols"] = syms
 
@@ -781,7 +782,7 @@ def trading_engine_loop():
                                                 current_used_cap += size
                                                 add_log(f"🚀 [{bKey}] شراء {sym} عند {ask}$ ({exec_type})", "buys", "primary")
 
-                    elif bKey == "BOT_X":
+                    elif bKey in EXPERIMENTAL_BOTS:
                         tf = cfg.get("timeframe", "15m")
                         candles = fetch_klines(sym, interval=tf, limit=45)
                         if not candles:
@@ -793,8 +794,9 @@ def trading_engine_loop():
                         use_ts = bool(int(cfg.get("trailing_stop", 1)))
                         cb_pct = float(cfg.get("trailing_cb", 0.006))
                         still_x = []
+                        bot_state = shared_state["bots"][bKey]
 
-                        for pos in shared_state["bots"]["BOT_X"]["active_positions"].get(sym, []):
+                        for pos in bot_state["active_positions"].get(sym, []):
                             entry = pos['entry_price']
                             highest = pos.get('highest_price', entry)
                             if bid > highest:
@@ -840,21 +842,21 @@ def trading_engine_loop():
                                     fee_usd = (entry * sell_qty * fee_rate) + (real_exit * sell_qty * fee_rate)
                                     net_pnl = gross_pnl - fee_usd
 
-                                    shared_state["bots"]["BOT_X"]["daily_pnl"] += net_pnl
-                                    shared_state["bots"]["BOT_X"]["daily_pnl_coins"][sym] = shared_state["bots"]["BOT_X"]["daily_pnl_coins"].get(sym, 0.0) + net_pnl
-                                    shared_state["bots"]["BOT_X"]["trades_count"] += 1
+                                    bot_state["daily_pnl"] += net_pnl
+                                    bot_state["daily_pnl_coins"][sym] = bot_state["daily_pnl_coins"].get(sym, 0.0) + net_pnl
+                                    bot_state["trades_count"] += 1
                                     if net_pnl > 0:
-                                        shared_state["bots"]["BOT_X"]["winning_count"] += 1
+                                        bot_state["winning_count"] += 1
 
                                     database.archive_closed_trade({
-                                        "id": pos["id"], "bot_name": "BOT_X", "symbol": sym,
+                                        "id": pos["id"], "bot_name": bKey, "symbol": sym,
                                         "entry_price": entry, "exit_price": real_exit,
                                         "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                         "net_pnl": net_pnl, "reason": reason,
                                         "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
                                     database.delete_active_trade(pos["id"])
-                                    add_log(f"💰 [BOT_X] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    add_log(f"💰 [{bKey}] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                 else:
                                     if "30005" in str(res) or "Oversold" in str(res):
                                         database.delete_active_trade(pos['id'])
@@ -863,13 +865,13 @@ def trading_engine_loop():
                             else:
                                 still_x.append(pos)
 
-                        shared_state["bots"]["BOT_X"]["active_positions"][sym] = still_x
+                        bot_state["active_positions"][sym] = still_x
 
-                        lock_key = f"BOT_X_{sym}"
+                        lock_key = f"{bKey}_{sym}"
                         is_candle_locked = (LAST_ENTRY_CANDLE.get(lock_key) == latest_candle_time)
                         can_open_coin = len(still_x) < max_con
                         can_open_alloc = (current_used_cap + size) <= max_alloc
-                        port_not_locked = shared_state["bots"]["BOT_X"]["daily_pnl"] < shared_state["bots"]["BOT_X"]["daily_target"]
+                        port_not_locked = bot_state["daily_pnl"] < bot_state["daily_target"]
                         entry_ready = bot_x_entry_ok(candles) and bot_x_htf_ok(sym, "60m")
 
                         if cfg.get("status") == "RUNNING" and entry_ready and not is_candle_locked and can_open_coin and can_open_alloc and port_not_locked:
@@ -882,21 +884,21 @@ def trading_engine_loop():
                                         ok, res = place_order(sym, "BUY", qty=q, quote_qty=size, order_type="MARKET")
                                     if ok:
                                         LAST_ENTRY_CANDLE[lock_key] = latest_candle_time
-                                        trade_id = f"bot_x_{int(time.time()*1000)}"
+                                        trade_id = f"{bKey.lower()}_{int(time.time()*1000)}"
                                         time_str = get_current_iso_time()
                                         t_obj = {
-                                            'id': trade_id, 'bot_name': 'BOT_X', 'symbol': sym,
+                                            'id': trade_id, 'bot_name': bKey, 'symbol': sym,
                                             'entry_price': ask, 'highest_price': ask, 'qty': q,
                                             'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct,
                                             'time_str': time_str
                                         }
                                         database.insert_active_trade(t_obj)
-                                        shared_state["bots"]["BOT_X"]["active_positions"][sym].append({
+                                        bot_state["active_positions"][sym].append({
                                             'id': trade_id, 'entry_price': ask, 'highest_price': ask, 'qty': q,
                                             'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct, 'time': time_str
                                         })
                                         current_used_cap += size
-                                        add_log(f"🧪 [BOT_X] شراء {sym} عند {ask}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
+                                        add_log(f"🧪 [{bKey}] شراء {sym} عند {ask}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
 
         except Exception as e:
             add_log(f"خطأ محرك التداول: {e}", "system", "warning")

@@ -96,7 +96,9 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
     <button class="tab" onclick="showTab('t-bot_2a', this)">⚡ Bot 2A</button>
     <button class="tab" onclick="showTab('t-bot_2b', this)">⚡ Bot 2B</button>
     <button class="tab" onclick="showTab('t-bot_2c', this)">⚡ Bot 2C</button>
-    <button class="tab" onclick="showTab('t-bot_x', this)">🧪 Bot X</button>
+    <button class="tab" onclick="showTab('t-bot_x1', this)">🧪 X1</button>
+    <button class="tab" onclick="showTab('t-bot_x2', this)">🧪 X2</button>
+    <button class="tab" onclick="showTab('t-bot_x3', this)">🧪 X3</button>
     <button class="tab" onclick="showTab('t-w', this)">💰 المحفظة</button>
   </div>
 
@@ -198,7 +200,9 @@ var BOT_DEFS = [
   {key:'BOT_2A', name:'⚡ Bot 2A (Scalp 15m)', tf:'15m', isX:false},
   {key:'BOT_2B', name:'⚡ Bot 2B (Swing 1h)', tf:'60m', isX:false},
   {key:'BOT_2C', name:'⚡ Bot 2C (Custom TF)', tf:'5m', isX:false},
-  {key:'BOT_X', name:'🧪 Bot X (تجريبي محسّن)', tf:'15m', isX:true}
+  {key:'BOT_X1', name:'🧪 Bot X1 (سريع 5m)', tf:'5m', isX:true},
+  {key:'BOT_X2', name:'🧪 Bot X2 (قياسي 15m)', tf:'15m', isX:true},
+  {key:'BOT_X3', name:'🧪 Bot X3 (أوسع 15m)', tf:'15m', isX:true}
 ];
 
 function buildBotMarkup(){
