@@ -96,7 +96,7 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
     <button class="tab" onclick="showTab('t-bot_2a', this)">⚡ Bot 2A</button>
     <button class="tab" onclick="showTab('t-bot_2b', this)">⚡ Bot 2B</button>
     <button class="tab" onclick="showTab('t-bot_2c', this)">⚡ Bot 2C</button>
-    <button class="tab" onclick="showTab('t-bot_3', this)">🎯 Bot 3</button>
+    <button class="tab" onclick="showTab('t-bot_x', this)">🧪 Bot X</button>
     <button class="tab" onclick="showTab('t-w', this)">💰 المحفظة</button>
   </div>
 
@@ -194,11 +194,11 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
 
 <script>
 var BOT_DEFS = [
-  {key:'BOT_1', name:'🤖 Bot 1 (EWO 5m)', tf:'5m', isB3:false},
-  {key:'BOT_2A', name:'⚡ Bot 2A (Scalp 15m)', tf:'15m', isB3:false},
-  {key:'BOT_2B', name:'⚡ Bot 2B (Swing 1h)', tf:'60m', isB3:false},
-  {key:'BOT_2C', name:'⚡ Bot 2C (Custom TF)', tf:'5m', isB3:false},
-  {key:'BOT_3', name:'🎯 Bot 3 (Manual Trigger)', tf:'1m', isB3:true}
+  {key:'BOT_1', name:'🤖 Bot 1 (EWO 5m)', tf:'5m', isX:false},
+  {key:'BOT_2A', name:'⚡ Bot 2A (Scalp 15m)', tf:'15m', isX:false},
+  {key:'BOT_2B', name:'⚡ Bot 2B (Swing 1h)', tf:'60m', isX:false},
+  {key:'BOT_2C', name:'⚡ Bot 2C (Custom TF)', tf:'5m', isX:false},
+  {key:'BOT_X', name:'🧪 Bot X (تجريبي محسّن)', tf:'15m', isX:true}
 ];
 
 function buildBotMarkup(){
@@ -206,21 +206,27 @@ function buildBotMarkup(){
   BOT_DEFS.forEach(function(b, idx){
     var pfx = b.key.toLowerCase();
     var activeCls = (idx === 0) ? 'active' : '';
-    var tfBlock = !b.isB3 ? 
-      ('<div><label style="font-size:10px;color:var(--sub)">الفريم الزمني</label>' +
+    var tfBlock =
+      '<div><label style="font-size:10px;color:var(--sub)">الفريم الزمني</label>' +
       '<select id="' + pfx + '-tf">' +
       '<option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="60m">1h</option>' +
-      '</select></div>') :
-      ('<div><label style="font-size:10px;color:var(--sub)">Trailing Stop</label>' +
-      '<select id="' + pfx + '-ts"><option value="1">مفعّل ✅</option><option value="0">معطّل ❌</option></select></div>');
+      '</select></div>';
+    var xExtra = b.isX ? (
+      '<div><label style="font-size:10px;color:var(--sub)">Trailing Stop</label>' +
+      '<select id="' + pfx + '-ts"><option value="1">مفعّل ✅</option><option value="0">معطّل ❌</option></select></div>' +
+      '<div><label style="font-size:10px;color:var(--sub)">Trailing CB %</label><input type="number" id="' + pfx + '-cb" value="0.6" step="0.1"></div>' +
+      '<div style="grid-column:1/-1;font-size:9.5px;color:var(--sub);padding:0 2px">دخول: EWO + تأكيد فريم أعلى 1h + (حجم أو RSI). خروج: TP / SL / Trailing / عكس EWO بعد ربح ≥ 0.8%</div>'
+    ) : '';
 
     html += '<div id="t-' + pfx + '" class="tab-pane ' + activeCls + '">' +
-      '<div class="card" style="display:flex;justify-content:space-between;align-items:center">' +
+      '<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">' +
         '<span>' + b.name + ': <strong id="' + pfx + '-st" style="color:#f59e0b">PAUSED</strong></span>' +
-        '<div style="display:flex;gap:3px">' +
+        '<div style="display:flex;gap:3px;flex-wrap:wrap">' +
           '<button class="icon-btn" style="background:var(--success);color:#fff" title="تشغيل" onclick="setSt(\'' + b.key + '\',\'RUNNING\')">▶️</button>' +
           '<button class="icon-btn" style="background:#f59e0b;color:#000" title="إيقاف مؤقت" onclick="setSt(\'' + b.key + '\',\'PAUSED\')">⏸️</button>' +
           '<button class="icon-btn" style="background:var(--danger);color:#fff" title="إيقاف تام" onclick="setSt(\'' + b.key + '\',\'STOPPED\')">⏹️</button>' +
+          '<button class="btn" style="background:#0284c7;color:#fff;font-size:10px" onclick="downloadBotClosed(\'' + b.key + '\')">⬇️ صفقات</button>' +
+          '<button class="btn" style="background:#334155;color:#fff;font-size:10px" onclick="downloadBotLogs(\'' + b.key + '\')">⬇️ سجل</button>' +
         '</div>' +
       '</div>' +
       '<div class="stats-row">' +
@@ -236,8 +242,9 @@ function buildBotMarkup(){
           '<div><label style="font-size:10px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="' + pfx + '-size" value="10"></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label><select id="' + pfx + '-ordtype"><option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option><option value="MARKET">سعر السوق (Market)</option><option value="LIMIT">أمر معلق (Limit)</option></select></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">هدف الربح (TP %)</label><input type="number" id="' + pfx + '-tp" value="2.5" step="0.1"></div>' +
-          '<div><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="' + pfx + '-sl" value="1.2" step="0.1"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="' + pfx + '-sl" value="' + (b.isX ? '1.0' : '1.2') + '" step="0.1"></div>' +
           tfBlock +
+          xExtra +
           '<div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg(\'' + b.key + '\', \'' + pfx + '\')">💾 حفظ</button></div>' +
         '</div>' +
       '</details>' +
@@ -263,7 +270,10 @@ function buildBotMarkup(){
         '</div>' +
       '</details>' +
       '<details class="card">' +
-        '<summary style="color:#60a5fa">📜 سجل الصفقات المغلقة والعمولات ▾</summary>' +
+        '<summary style="display:flex;justify-content:space-between;align-items:center;color:#60a5fa">' +
+          '<span>📜 سجل الصفقات المغلقة والعمولات ▾</span>' +
+          '<button class="btn" style="background:#0284c7;color:#fff;font-size:10px" onclick="event.stopPropagation(); downloadBotClosed(\'' + b.key + '\')">⬇️ تنزيل CSV</button>' +
+        '</summary>' +
         '<div style="overflow-x:auto;padding-top:6px">' +
           '<table id="' + pfx + '-history-table"><thead><tr><th>العملة</th><th>الدخول</th><th>الخروج</th><th>الكمية</th><th>صافي الربح</th><th>العمولة</th><th>السبب</th><th>الوقت</th></tr></thead><tbody></tbody></table>' +
         '</div>' +
@@ -394,10 +404,20 @@ async function saveBotCfg(botName, prefix){
   if(tfEl) payload.timeframe = tfEl.value;
   var tsEl = document.getElementById(prefix+'-ts');
   if(tsEl) payload.trailing_stop = parseInt(tsEl.value);
+  var cbEl = document.getElementById(prefix+'-cb');
+  if(cbEl) payload.trailing_cb = (parseFloat(cbEl.value)||0.6) / 100.0;
 
   await fetch('/api/save_bot_config', {method:'POST', body:JSON.stringify(payload)});
   alert('✅ تم حفظ إعدادات ' + botName + '!');
   update();
+}
+
+function downloadBotClosed(botName){
+  window.location.href = '/api/export_closed?bot_name=' + encodeURIComponent(botName);
+}
+
+function downloadBotLogs(botName){
+  window.location.href = '/api/export_logs?bot_name=' + encodeURIComponent(botName);
 }
 
 async function triggerBuy(botName, sym){
@@ -566,6 +586,7 @@ async function update(){
           if(document.getElementById(pfx+'-sl') && bObj.sl_pct !== undefined) document.getElementById(pfx+'-sl').value = bObj.sl_pct;
           if(document.getElementById(pfx+'-tf') && bObj.timeframe) document.getElementById(pfx+'-tf').value = bObj.timeframe;
           if(document.getElementById(pfx+'-ts') && bObj.trailing_stop !== undefined) document.getElementById(pfx+'-ts').value = bObj.trailing_stop;
+          if(document.getElementById(pfx+'-cb') && bObj.trailing_cb !== undefined) document.getElementById(pfx+'-cb').value = (parseFloat(bObj.trailing_cb) * 100).toFixed(1);
         }
       });
       initialConfigsPopulated = true;

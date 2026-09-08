@@ -167,12 +167,17 @@ def init_db():
     """)
 
     default_3_symbols = "SOLUSDT, BTCUSDT, ETHUSDT"
+
+    # Remove deprecated Bot 3 before inserting replacements.
+    cursor.execute("DELETE FROM bots_config WHERE bot_name = 'BOT_3'")
+    cursor.execute("DELETE FROM active_trades WHERE bot_name = 'BOT_3'")
+
     bots = [
         (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.025, 0.012, 0, 'PAUSED'),
         (2, 'BOT_2A', '⚡ Bot 2A (Scalp 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.012, 0, 'PAUSED'),
         (3, 'BOT_2B', '⚡ Bot 2B (Swing 1h)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '60m', 0.035, 0.015, 0, 'PAUSED'),
         (4, 'BOT_2C', '⚡ Bot 2C (Custom TF)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.020, 0.010, 0, 'PAUSED'),
-        (5, 'BOT_3', '🎯 Bot 3 (Manual Trigger)', 'BTCUSDT, ETHUSDT', 'CHASE_LIMIT', 50.0, 1, 10.0, '1m', 0.025, 0.012, 1, 'PAUSED')
+        (5, 'BOT_X', '🧪 Bot X (تجريبي محسّن)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.010, 1, 'PAUSED')
     ]
 
     for b in bots:
@@ -180,6 +185,22 @@ def init_db():
         INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, order_exec_type, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, b)
+
+    # If BOT_X missing (e.g. id=5 was occupied previously), insert by bot_name only.
+    cursor.execute("SELECT id FROM bots_config WHERE bot_name = 'BOT_X'")
+    if cursor.fetchone() is None:
+        cursor.execute("""
+        INSERT INTO bots_config (bot_name, display_name, symbols, order_exec_type, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, trailing_cb, status)
+        VALUES ('BOT_X', '🧪 Bot X (تجريبي محسّن)', ?, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.010, 1, 0.006, 'PAUSED')
+        """, (default_3_symbols,))
+
+    cursor.execute("""
+    UPDATE bots_config
+    SET display_name = '🧪 Bot X (تجريبي محسّن)',
+        trailing_stop = 1,
+        trailing_cb = COALESCE(trailing_cb, 0.006)
+    WHERE bot_name = 'BOT_X'
+    """)
 
     conn.commit()
     conn.close()
