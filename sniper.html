@@ -6,18 +6,20 @@
 :root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
 *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
 body{background:var(--bg);color:var(--text);line-height:1.4;padding:8px;padding-top:max(8px,env(safe-area-inset-top));padding-bottom:max(8px,env(safe-area-inset-bottom));padding-left:max(8px,env(safe-area-inset-left));padding-right:max(8px,env(safe-area-inset-right))}
-.app-header{display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--card);border-radius:10px;border:1px solid var(--border);margin-bottom:8px}
-.app-header-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
-.app-header-title{font-size:14px;font-weight:700;line-height:1.3;min-width:0}
-.app-header-meta{font-size:10px;color:var(--sub);margin-top:3px}
-.app-header-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
-.app-nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
-.app-nav a{display:block;text-align:center;text-decoration:none;font-size:11px;font-weight:700;padding:8px 4px;border-radius:6px;background:#151e30;border:1px solid var(--border);color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app-header{display:flex;flex-direction:column;gap:4px;padding:6px 8px;background:var(--card);border-radius:8px;border:1px solid var(--border);margin-bottom:6px}
+.app-header-top{display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap}
+.app-header-title{font-size:12px;font-weight:700;line-height:1.2;display:inline}
+.app-header-meta{font-size:9px;color:var(--sub);margin-right:6px;display:inline}
+.app-header-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
+.app-nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px}
+.app-nav a{display:block;text-align:center;text-decoration:none;font-size:10px;font-weight:700;padding:5px 2px;border-radius:5px;background:#151e30;border:1px solid var(--border);color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .app-nav a.active{background:var(--primary);color:#fff;border-color:var(--primary)}
-.wallet-bar{display:grid;grid-template-columns:1fr 1fr;gap:6px;width:100%}
-.wallet-item{background:#151e30;border:1px solid var(--border);border-radius:6px;padding:6px 8px;min-width:0}
-.wallet-item .label{font-size:10px;color:var(--sub);display:block}
-.wallet-item .val{font-size:12px;font-weight:700;display:block;margin-top:2px}
+.wallet-bar{display:flex;gap:4px;align-items:center}
+.wallet-item{background:#151e30;border:1px solid var(--border);border-radius:5px;padding:2px 6px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.wallet-item .label{font-size:9px;color:var(--sub)}
+.wallet-item .val{font-size:11px;font-weight:700}
+.logs{max-height:160px;overflow-y:auto;font-family:monospace;font-size:10.5px;background:#090d16;padding:6px;border-radius:6px;border:1px solid var(--border)}
+.log-item{padding:2px 0;border-bottom:1px solid #1f293d44;display:flex;gap:4px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
 .btn{padding:5px 8px;border:none;border-radius:5px;font-weight:bold;cursor:pointer;font-size:11px;display:inline-flex;align-items:center;justify-content:center;gap:3px}
 .icon-btn{padding:3px 6px;font-size:13px;border-radius:5px;border:none;cursor:pointer}
@@ -84,11 +86,15 @@ th{color:var(--sub)}
   <header class="app-header">
     <div class="app-header-top">
       <div style="min-width:0">
-        <div class="app-header-title">🎯 رادار وقناص الفرص</div>
-        <div class="app-header-meta">ربح القناص اليوم: <strong id="snp-daily-pnl" style="color:#10b981">+0.00$</strong></div>
+        <span class="app-header-title">🎯 رادار القناص</span>
+        <span class="app-header-meta">اليوم: <strong id="snp-daily-pnl" style="color:#10b981">+0.00$</strong></span>
       </div>
       <div class="app-header-actions">
-        <button class="btn" style="background:#0284c7;color:#fff;font-size:10px;padding:6px 8px" onclick="fetchSmartScanner()" title="تحديث">🔄</button>
+        <div class="wallet-bar">
+          <div class="wallet-item"><span class="label">USDT</span><strong id="live-usdt" class="val" style="color:#10b981">0.00$</strong></div>
+          <div class="wallet-item"><span class="label">المحفظة</span><strong id="live-total-usd" class="val" style="color:#38bdf8">0.00$</strong></div>
+        </div>
+        <button class="btn" style="background:#0284c7;color:#fff;font-size:10px;padding:4px 7px" onclick="fetchSmartScanner()" title="تحديث">🔄</button>
       </div>
     </div>
     <nav class="app-nav" aria-label="التنقل الرئيسي">
@@ -96,16 +102,6 @@ th{color:var(--sub)}
       <a href="/sniper" class="active">🎯 القناص</a>
       <a href="/analytics">📊 يدوي</a>
     </nav>
-    <div class="wallet-bar">
-      <div class="wallet-item">
-        <span class="label">USDT</span>
-        <strong id="live-usdt" class="val" style="color:#10b981">0.00 $</strong>
-      </div>
-      <div class="wallet-item">
-        <span class="label">المحفظة</span>
-        <strong id="live-total-usd" class="val" style="color:#38bdf8">0.00 $</strong>
-      </div>
-    </div>
   </header>
 
   <!-- البحث السريع -->
@@ -315,6 +311,27 @@ th{color:var(--sub)}
     </div>
   </details>
 
+  <!-- السجل المباشر -->
+  <details class="card" open>
+    <summary style="display:flex;justify-content:space-between;align-items:center">
+      <span>📜 السجل المباشر</span>
+      <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
+        <input type="text" id="log-search" placeholder="🔍 بحث..." style="width:80px;padding:2px 4px;font-size:10px" oninput="renderLogs()">
+        <button class="icon-btn" style="background:#334155;color:#fff" title="نسخ" onclick="copyLogs()">📋</button>
+      </div>
+    </summary>
+    <div style="padding-top:6px">
+      <div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:4px">
+        <button class="btn log-filter-btn" style="background:var(--primary);color:#fff;font-size:9.5px" onclick="setLogFilter('all', this)">الكل</button>
+        <button class="btn log-filter-btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('sniper', this)">🎯 قناص</button>
+        <button class="btn log-filter-btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('buys', this)">🚀 شراء</button>
+        <button class="btn log-filter-btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('sells', this)">💰 بيع</button>
+        <button class="btn log-filter-btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('orders', this)">📤 أوامر</button>
+      </div>
+      <div class="logs" id="logs"></div>
+    </div>
+  </details>
+
   <div class="modal-overlay" id="snp-edit-modal">
     <div class="modal">
       <h4 style="margin-bottom:6px;font-size:12px">✏️ تعديل صفقة القناص</h4>
@@ -429,12 +446,66 @@ async function loadBal(){
     const d = await r.json();
     freeUsdt = d.real_balance_usdt || 0;
     latestMarketPrices = d.market_prices || {};
-    document.getElementById('live-usdt').innerText = freeUsdt.toFixed(2) + ' $';
-    document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0).toFixed(2) + ' $';
+    document.getElementById('live-usdt').innerText = freeUsdt.toFixed(2) + '$';
+    document.getElementById('live-total-usd').innerText = (d.total_wallet_usd_value || 0).toFixed(2) + '$';
+    rawLogs = d.recent_logs || [];
+    renderLogs();
     updatePanelPrice();
   }catch(e){}
 }
 loadBal(); setInterval(loadBal, 2500);
+
+var rawLogs = [];
+var logsText = "";
+var currentLogFilter = "all";
+
+function setLogFilter(cat, btn){
+  currentLogFilter = cat;
+  document.querySelectorAll('.log-filter-btn').forEach(function(b){
+    b.style.background = '#151e30';
+    b.style.color = 'var(--sub)';
+  });
+  if(btn){
+    btn.style.background = 'var(--primary)';
+    btn.style.color = '#fff';
+  }
+  renderLogs();
+}
+
+function copyLogs(){
+  navigator.clipboard.writeText(logsText).then(function(){ alert("✅ تم نسخ السجلات!"); });
+}
+
+function renderLogs(){
+  var searchEl = document.getElementById('log-search');
+  var searchQ = (searchEl && searchEl.value || '').toLowerCase();
+  var lHtml = '';
+  logsText = '';
+
+  rawLogs.forEach(function(l){
+    var cat = l.cat || 'system';
+    var msg = l.msg || '';
+    var msgLower = msg.toLowerCase();
+    var isSniper = /قناص|sniper|snp/i.test(msg);
+
+    if(currentLogFilter === 'sniper'){
+      if(!isSniper) return;
+    } else if(currentLogFilter !== 'all' && cat !== currentLogFilter){
+      return;
+    }
+    if(searchQ && !msgLower.includes(searchQ) && !cat.includes(searchQ)) return;
+
+    var typeColor = '#f3f4f6';
+    if(l.type === 'danger') typeColor = 'var(--danger)';
+    else if(l.type === 'success') typeColor = 'var(--success)';
+    else if(l.type === 'warning') typeColor = '#f59e0b';
+    else if(l.type === 'primary') typeColor = '#60a5fa';
+
+    lHtml += '<div class="log-item"><span style="color:var(--sub)">[' + l.time + ']</span> <span style="color:' + typeColor + '">' + msg + '</span></div>';
+    logsText += '[' + l.time + '] ' + msg + '\n';
+  });
+  document.getElementById('logs').innerHTML = lHtml || '<div style="color:var(--sub);text-align:center">لا توجد أحداث</div>';
+}
 
 function updatePanelPrice(){
   const sym = document.getElementById('snp-sym').value;
