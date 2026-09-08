@@ -749,7 +749,17 @@ async function update(){
           coinsTable.querySelector('tbody').innerHTML = coinsTableHtml || '<tr><td colspan="6" style="text-align:center">لا توجد عملات</td></tr>';
         }
         
-        var usedUsd = totalOpen * (bObj.trade_size || 10);
+        var usedUsd = 0;
+        if(bObj.active_positions){
+          Object.keys(bObj.active_positions).forEach(function(s){
+            (bObj.active_positions[s] || []).forEach(function(p){
+              if(p.meta && p.meta.trade_size_usdt) usedUsd += parseFloat(p.meta.trade_size_usdt)||0;
+              else usedUsd += (bObj.trade_size || 10);
+            });
+          });
+        } else {
+          usedUsd = totalOpen * (bObj.trade_size || 10);
+        }
         var capEl = document.getElementById(pfx+'-cap-used');
         if(capEl) capEl.innerText = usedUsd.toFixed(0) + '/' + (bObj.max_allocation||50) + '$';
 
