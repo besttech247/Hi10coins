@@ -497,6 +497,55 @@ def calculate_ewo(candles):
         vals.append(sma5 - sma35)
     return vals[0], vals[1], vals[2]
 
+def calculate_ewo_series(candles):
+    """Full EWO histogram series aligned with candles (None until enough history)."""
+    if not candles:
+        return []
+    medians = [(float(c["high"]) + float(c["low"])) / 2.0 for c in candles]
+    out = []
+    for i in range(len(medians)):
+        if i + 1 < 35:
+            out.append(None)
+            continue
+        sub = medians[: i + 1]
+        sma5 = sum(sub[-5:]) / 5.0
+        sma35 = sum(sub[-35:]) / 35.0
+        out.append(sma5 - sma35)
+    return out
+
+def build_ewo_chart_payload(symbol, limit=80):
+    """Multi-TF EWO payload for the charts page."""
+    sym = sanitize_str(symbol).upper()
+    if sym and not (sym.endswith("USDT") or sym.endswith("USDC")):
+        sym = f"{sym}USDT"
+    limit = max(45, min(int(limit or 80), 150))
+    bid, ask = get_orderbook(sym)
+    frames = {}
+    for tf in MTF_TF_ORDER:
+        candles = fetch_klines(sym, interval=tf, limit=limit)
+        ewo = calculate_ewo_series(candles) if candles else []
+        e3, e2, e1 = calculate_ewo(candles) if candles and len(candles) >= 38 else (None, None, None)
+        rebound = bool(e1 is not None and e2 is not None and e3 is not None and (e1 < 0 and e1 > e2 and e2 <= e3))
+        supportive = bool(e1 is not None and e2 is not None and ((e1 >= e2) or (e1 > 0)))
+        frames[tf] = {
+            "label": MTF_TF_LABELS.get(tf, tf),
+            "times": [c.get("time") for c in (candles or [])],
+            "closes": [round(float(c.get("close", 0)), 8) for c in (candles or [])],
+            "ewo": [None if v is None else round(float(v), 8) for v in ewo],
+            "e3": e3,
+            "e2": e2,
+            "e1": e1,
+            "rebound": rebound,
+            "supportive": supportive,
+            "count": len(candles or [])
+        }
+    return {
+        "symbol": sym,
+        "bid": bid,
+        "ask": ask,
+        "timeframes": frames
+    }
+
 def candle_vol_mult(candles):
     if not candles or len(candles) < 5:
         return 0.0
@@ -666,7 +715,8 @@ def settle_exit_pnl(entry, qty, order_res, bid_fallback, entry_fee_rate, exec_ty
     exit_px, filled = resolve_fill(order_res, qty_hint=qty, price_fallback=bid_fallback or entry)
     if exit_px is None:
         exit_px = float(bid_fallback or entry)
-    sell_qty = float(filled if filled and filled > 0 else qty)
+    exit_px = clean_price(exit_px)
+    sell_qty = clean_qty(filled if filled and filled > 0 else qty)
     exit_fee = resolve_fee_rate(exec_type, order_res)
     gross, fee, net = calc_round_trip_pnl(entry, exit_px, sell_qty, entry_fee_rate, exit_fee)
     return exit_px, sell_qty, gross, fee, net
@@ -1176,7 +1226,7 @@ def trading_engine_loop():
                                                     'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                                                 })
                                                 current_used_cap += size
-                                                add_log(f"🚀 [{bKey}] شراء {sym} عند {fill_entry}$ ({exec_type})", "buys", "primary")
+                                                add_log(f"🚀 [{bKey}] شراء {sym} عند {fmt_usd(fill_entry)}$ ({exec_type})", "buys", "primary")
                                     else:
                                         push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym} (مطلوب {size}$)", cooldown_sec=300)
 
@@ -1298,7 +1348,7 @@ def trading_engine_loop():
                                             'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                                         })
                                         current_used_cap += size
-                                        add_log(f"🧪 [{bKey}] شراء {sym} عند {fill_entry}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
+                                        add_log(f"🧪 [{bKey}] شراء {sym} عند {fmt_usd(fill_entry)}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
                             else:
                                 push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym} (مطلوب {size}$)", cooldown_sec=300)
 
@@ -1528,7 +1578,7 @@ def trading_engine_loop():
                             if hierarchical:
                                 parent_lab = "off" if hier_parent == "off" else MTF_TF_LABELS.get(hier_parent, hier_parent)
                                 mode_tag = f" H→{parent_lab}"
-                            add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {fill_entry}$ بحجم {size}$ ({exec_type})", "buys", "primary")
+                            add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {fmt_usd(fill_entry)}$ بحجم {size}$ ({exec_type})", "buys", "primary")
 
         except Exception as e:
             add_log(f"خطأ محرك التداول: {e}", "system", "warning")
@@ -1760,8 +1810,34 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
                 self.wfile.write(b"<h3>analytics.html not found.</h3><a href='/'>Back</a>")
 
+        elif self.path.startswith('/api/ewo_chart'):
+            try:
+                query = urllib.parse.urlparse(self.path).query
+                params = urllib.parse.parse_qs(query)
+                sym = params.get("symbol", ["ETHUSDT"])[0]
+                try:
+                    limit = int(params.get("limit", [80])[0])
+                except Exception:
+                    limit = 80
+                payload = build_ewo_chart_payload(sym, limit=limit)
+                self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+                self.wfile.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+            except Exception as e:
+                self.send_response(500); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}, ensure_ascii=False).encode('utf-8'))
+
         elif self.path == '/api/logout':
             self.send_response(200); self.send_header('Set-Cookie', 'session_id=; Path=/; Max-Age=0'); self.end_headers()
+
+        elif self.path == '/ewo':
+            try:
+                with open("ewo.html", "r", encoding="utf-8") as f:
+                    html_c = f.read()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(html_c.encode('utf-8'))
+            except Exception:
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(b"<h3>ewo.html not found.</h3><a href='/'>Back</a>")
 
         else:
             try:
@@ -1847,7 +1923,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     }
                     database.insert_sniper_trade(snp_trade)
                     shared_state["sniper_positions"].append(snp_trade)
-                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {fill_entry}$ (كمية: {fill_qty})"
+                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {fmt_usd(fill_entry)}$ (كمية: {fill_qty})"
                     add_log(msg, "buys", "primary")
                 else:
                     msg = f"❌ فشل القنص: {res}"
@@ -2026,7 +2102,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                         'tp_pct': t_obj['tp_pct'], 'sl_pct': t_obj['sl_pct'], 'time': time_str,
                         'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                     })
-                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {fill_entry}$ ({exec_type})"
+                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {fmt_usd(fill_entry)}$ ({exec_type})"
                     add_log(msg, "buys", "primary")
                 else: msg = f"❌ فشل الشراء: {res}"
             else: msg = "فشل قراءة السعر"

@@ -11,8 +11,8 @@ body{background:var(--bg);color:var(--text);line-height:1.4;padding:8px;padding-
 .app-header-title{font-size:12px;font-weight:700;line-height:1.2;display:inline}
 .app-header-meta{font-size:9px;color:var(--sub);margin-right:6px;display:inline}
 .app-header-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
-.app-nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px}
-.app-nav a{display:block;text-align:center;text-decoration:none;font-size:10px;font-weight:700;padding:5px 2px;border-radius:5px;background:#151e30;border:1px solid var(--border);color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.app-nav{display:flex;flex-wrap:nowrap;gap:3px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:thin;padding-bottom:2px}
+.app-nav a{flex:0 0 auto;min-width:76px;display:block;text-align:center;text-decoration:none;font-size:10px;font-weight:700;padding:5px 8px;border-radius:5px;background:#151e30;border:1px solid var(--border);color:var(--sub);white-space:nowrap}
 .app-nav a.active{background:var(--primary);color:#fff;border-color:var(--primary)}
 .wallet-bar{display:flex;gap:4px;align-items:center}
 .wallet-item{background:#151e30;border:1px solid var(--border);border-radius:5px;padding:2px 6px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
@@ -68,6 +68,7 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
     <nav class="app-nav" aria-label="التنقل الرئيسي">
       <a href="/" class="active">🏠 الرئيسية</a>
       <a href="/sniper">🎯 القناص</a>
+      <a href="/ewo">📈 EWO</a>
       <a href="/analytics">📊 يدوي</a>
     </nav>
   </header>
