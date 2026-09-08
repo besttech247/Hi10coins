@@ -1,0 +1,18 @@
+# SQLite databases (keep on Railway Volume, never in Git)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+bot_data.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local / editor
+.env
+.DS_Store
+*.log
