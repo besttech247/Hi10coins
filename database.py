@@ -2,8 +2,23 @@ import os
 import sqlite3
 import hashlib
 import shutil
+import json
 
 LEGACY_DB = "bot_data.db"
+
+DEFAULT_MTF_SETTINGS = {
+    "_global": {
+        "max_open_positions": 4,
+        "be_offset": 0.001,
+        "ewo_exit_min_profit": 0.008
+    },
+    "5m":  {"enabled": True,  "trade_size_usdt": 15,  "sl_pct": 0.008, "tp_pct": 0.015, "be_enabled": False, "be_trigger_pct": 0.010, "trail_enabled": False, "trail_trigger_pct": 0.018, "trail_cb_pct": 0.006},
+    "15m": {"enabled": True,  "trade_size_usdt": 25,  "sl_pct": 0.010, "tp_pct": 0.022, "be_enabled": True,  "be_trigger_pct": 0.012, "trail_enabled": True,  "trail_trigger_pct": 0.018, "trail_cb_pct": 0.006},
+    "30m": {"enabled": True,  "trade_size_usdt": 35,  "sl_pct": 0.012, "tp_pct": 0.028, "be_enabled": True,  "be_trigger_pct": 0.015, "trail_enabled": True,  "trail_trigger_pct": 0.022, "trail_cb_pct": 0.007},
+    "60m": {"enabled": True,  "trade_size_usdt": 50,  "sl_pct": 0.014, "tp_pct": 0.035, "be_enabled": True,  "be_trigger_pct": 0.018, "trail_enabled": True,  "trail_trigger_pct": 0.028, "trail_cb_pct": 0.008},
+    "4h":  {"enabled": True,  "trade_size_usdt": 70,  "sl_pct": 0.018, "tp_pct": 0.045, "be_enabled": True,  "be_trigger_pct": 0.022, "trail_enabled": True,  "trail_trigger_pct": 0.035, "trail_cb_pct": 0.010},
+    "1d":  {"enabled": False, "trade_size_usdt": 100, "sl_pct": 0.025, "tp_pct": 0.060, "be_enabled": True,  "be_trigger_pct": 0.030, "trail_enabled": True,  "trail_trigger_pct": 0.045, "trail_cb_pct": 0.012}
+}
 
 
 def _resolve_db_file():
@@ -37,6 +52,37 @@ def _ensure_db_location():
         and os.path.getsize(LEGACY_DB) > 0
     ):
         shutil.copy2(LEGACY_DB, DB_FILE)
+
+
+def _ensure_column(cursor, table, column, col_def):
+    cursor.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cursor.fetchall()]
+    if column not in cols:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+
+
+def parse_mtf_settings(raw):
+    settings = json.loads(json.dumps(DEFAULT_MTF_SETTINGS))
+    if not raw:
+        return settings
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except Exception:
+        return settings
+    if isinstance(data, dict):
+        if "_global" in data and isinstance(data["_global"], dict):
+            settings["_global"].update(data["_global"])
+        for tf, cfg in data.items():
+            if tf == "_global" or not isinstance(cfg, dict):
+                continue
+            if tf not in settings:
+                settings[tf] = {}
+            settings[tf].update(cfg)
+    return settings
+
+
+def dump_mtf_settings(settings):
+    return json.dumps(settings if settings else DEFAULT_MTF_SETTINGS, ensure_ascii=False)
 
 
 def init_db():
@@ -111,9 +157,15 @@ def init_db():
         qty REAL NOT NULL,
         tp_pct REAL DEFAULT 0.025,
         sl_pct REAL DEFAULT 0.012,
-        time_str TEXT NOT NULL
+        time_str TEXT NOT NULL,
+        timeframe TEXT DEFAULT '',
+        meta_json TEXT DEFAULT '{}'
     )
     """)
+
+    _ensure_column(cursor, "bots_config", "mtf_settings", "TEXT DEFAULT ''")
+    _ensure_column(cursor, "active_trades", "timeframe", "TEXT DEFAULT ''")
+    _ensure_column(cursor, "active_trades", "meta_json", "TEXT DEFAULT '{}'")
 
     # جدول صفقات القناص مع التاق الخاص بالبروفايل
     cursor.execute("""
@@ -167,12 +219,32 @@ def init_db():
     """)
 
     default_3_symbols = "SOLUSDT, BTCUSDT, ETHUSDT"
+
+    # Remove deprecated bots before seeding replacements.
+    cursor.execute("DELETE FROM bots_config WHERE bot_name = 'BOT_3'")
+    cursor.execute("DELETE FROM active_trades WHERE bot_name = 'BOT_3'")
+
+    # Migrate legacy single BOT_X -> BOT_X1 safely
+    cursor.execute("SELECT id FROM bots_config WHERE bot_name = 'BOT_X1'")
+    has_x1 = cursor.fetchone() is not None
+    cursor.execute("SELECT id FROM bots_config WHERE bot_name = 'BOT_X'")
+    has_x = cursor.fetchone() is not None
+    if has_x and not has_x1:
+        cursor.execute("UPDATE bots_config SET bot_name = 'BOT_X1', display_name = '🧪 Bot X1 (سريع 5m)' WHERE bot_name = 'BOT_X'")
+    elif has_x and has_x1:
+        cursor.execute("DELETE FROM bots_config WHERE bot_name = 'BOT_X'")
+    cursor.execute("UPDATE active_trades SET bot_name = 'BOT_X1' WHERE bot_name = 'BOT_X'")
+    cursor.execute("UPDATE closed_trades SET bot_name = 'BOT_X1' WHERE bot_name = 'BOT_X'")
+
     bots = [
         (1, 'BOT_1', '🤖 Bot 1 (EWO 5m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.025, 0.012, 0, 'PAUSED'),
         (2, 'BOT_2A', '⚡ Bot 2A (Scalp 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.012, 0, 'PAUSED'),
         (3, 'BOT_2B', '⚡ Bot 2B (Swing 1h)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '60m', 0.035, 0.015, 0, 'PAUSED'),
         (4, 'BOT_2C', '⚡ Bot 2C (Custom TF)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.020, 0.010, 0, 'PAUSED'),
-        (5, 'BOT_3', '🎯 Bot 3 (Manual Trigger)', 'BTCUSDT, ETHUSDT', 'CHASE_LIMIT', 50.0, 1, 10.0, '1m', 0.025, 0.012, 1, 'PAUSED')
+        (5, 'BOT_X1', '🧪 Bot X1 (سريع 5m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '5m', 0.015, 0.008, 1, 'PAUSED'),
+        (6, 'BOT_X2', '🧪 Bot X2 (قياسي 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.025, 0.010, 1, 'PAUSED'),
+        (7, 'BOT_X3', '🧪 Bot X3 (أوسع 15m)', default_3_symbols, 'CHASE_LIMIT', 50.0, 1, 10.0, '15m', 0.035, 0.012, 1, 'PAUSED'),
+        (8, 'BOT_EWO_MTF', '📐 Bot EWO MTF', default_3_symbols, 'CHASE_LIMIT', 300.0, 2, 15.0, '15m', 0.022, 0.010, 1, 'PAUSED')
     ]
 
     for b in bots:
@@ -180,6 +252,45 @@ def init_db():
         INSERT OR IGNORE INTO bots_config (id, bot_name, display_name, symbols, order_exec_type, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, b)
+
+    x_defaults = [
+        ('BOT_X1', '🧪 Bot X1 (سريع 5m)', '5m', 0.015, 0.008, 0.005),
+        ('BOT_X2', '🧪 Bot X2 (قياسي 15m)', '15m', 0.025, 0.010, 0.006),
+        ('BOT_X3', '🧪 Bot X3 (أوسع 15m)', '15m', 0.035, 0.012, 0.008),
+    ]
+    for name, display, tf, tp, sl, cb in x_defaults:
+        cursor.execute("SELECT id FROM bots_config WHERE bot_name = ?", (name,))
+        if cursor.fetchone() is None:
+            cursor.execute("""
+            INSERT INTO bots_config (bot_name, display_name, symbols, order_exec_type, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, trailing_cb, status)
+            VALUES (?, ?, ?, 'CHASE_LIMIT', 50.0, 1, 10.0, ?, ?, ?, 1, ?, 'PAUSED')
+            """, (name, display, default_3_symbols, tf, tp, sl, cb))
+        cursor.execute("""
+        UPDATE bots_config
+        SET display_name = ?,
+            trailing_stop = 1,
+            trailing_cb = COALESCE(trailing_cb, ?)
+        WHERE bot_name = ?
+        """, (display, cb, name))
+
+    cursor.execute("DELETE FROM bots_config WHERE bot_name = 'BOT_X'")
+
+    # Ensure MTF bot exists with defaults
+    cursor.execute("SELECT id FROM bots_config WHERE bot_name = 'BOT_EWO_MTF'")
+    if cursor.fetchone() is None:
+        cursor.execute("""
+        INSERT INTO bots_config (bot_name, display_name, symbols, order_exec_type, max_allocation_usdt, max_concurrent_per_coin, trade_size_usdt, timeframe, tp_pct, sl_pct, trailing_stop, trailing_cb, status, mtf_settings)
+        VALUES ('BOT_EWO_MTF', '📐 Bot EWO MTF', ?, 'CHASE_LIMIT', 300.0, 2, 15.0, '15m', 0.022, 0.010, 1, 0.006, 'PAUSED', ?)
+        """, (default_3_symbols, dump_mtf_settings(DEFAULT_MTF_SETTINGS)))
+    else:
+        cursor.execute("""
+        UPDATE bots_config
+        SET display_name = '📐 Bot EWO MTF',
+            max_allocation_usdt = CASE WHEN max_allocation_usdt < 100 THEN 300.0 ELSE max_allocation_usdt END,
+            max_concurrent_per_coin = CASE WHEN max_concurrent_per_coin < 2 THEN 2 ELSE max_concurrent_per_coin END,
+            mtf_settings = CASE WHEN mtf_settings IS NULL OR mtf_settings = '' THEN ? ELSE mtf_settings END
+        WHERE bot_name = 'BOT_EWO_MTF'
+        """, (dump_mtf_settings(DEFAULT_MTF_SETTINGS),))
 
     conn.commit()
     conn.close()
@@ -242,13 +353,21 @@ def get_bot_config(bot_name):
     cursor.execute("SELECT * FROM bots_config WHERE bot_name = ?", (bot_name,))
     row = cursor.fetchone()
     conn.close()
-    return dict(row) if row else {}
+    if not row:
+        return {}
+    cfg = dict(row)
+    if bot_name == "BOT_EWO_MTF":
+        cfg["mtf_settings"] = parse_mtf_settings(cfg.get("mtf_settings"))
+    return cfg
 
 def update_bot_config(bot_name, updates):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    fields = [f"{k} = ?" for k in updates.keys()]
-    values = list(updates.values())
+    clean = dict(updates)
+    if "mtf_settings" in clean and not isinstance(clean["mtf_settings"], str):
+        clean["mtf_settings"] = dump_mtf_settings(clean["mtf_settings"])
+    fields = [f"{k} = ?" for k in clean.keys()]
+    values = list(clean.values())
     values.append(bot_name)
     cursor.execute(f"UPDATE bots_config SET {', '.join(fields)} WHERE bot_name = ?", values)
     conn.commit()
@@ -261,18 +380,34 @@ def load_all_active_trades():
     cursor.execute("SELECT * FROM active_trades ORDER BY time_str DESC")
     rows = cursor.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        meta = {}
+        try:
+            meta = json.loads(d.get("meta_json") or "{}")
+        except Exception:
+            meta = {}
+        d["meta"] = meta if isinstance(meta, dict) else {}
+        out.append(d)
+    return out
 
 def insert_active_trade(trade):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    meta = trade.get("meta") or {}
+    if trade.get("meta_json"):
+        meta_json = trade.get("meta_json")
+    else:
+        meta_json = json.dumps(meta, ensure_ascii=False)
     cursor.execute("""
-    INSERT OR REPLACE INTO active_trades (id, bot_name, symbol, entry_price, highest_price, qty, tp_pct, sl_pct, time_str)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO active_trades (id, bot_name, symbol, entry_price, highest_price, qty, tp_pct, sl_pct, time_str, timeframe, meta_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         trade["id"], trade["bot_name"], trade["symbol"], trade["entry_price"],
         trade.get("highest_price", trade["entry_price"]), trade["qty"],
-        trade.get("tp_pct", 0.025), trade.get("sl_pct", 0.012), trade["time_str"]
+        trade.get("tp_pct", 0.025), trade.get("sl_pct", 0.012), trade["time_str"],
+        trade.get("timeframe", ""), meta_json
     ))
     conn.commit()
     conn.close()
