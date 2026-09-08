@@ -166,6 +166,7 @@ def init_db():
     _ensure_column(cursor, "bots_config", "mtf_settings", "TEXT DEFAULT ''")
     _ensure_column(cursor, "active_trades", "timeframe", "TEXT DEFAULT ''")
     _ensure_column(cursor, "active_trades", "meta_json", "TEXT DEFAULT '{}'")
+    _ensure_column(cursor, "sniper_trades", "entry_fee_rate", "REAL DEFAULT 0.001")
 
     # جدول صفقات القناص مع التاق الخاص بالبروفايل
     cursor.execute("""
@@ -448,13 +449,14 @@ def insert_sniper_trade(trade):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-    INSERT OR REPLACE INTO sniper_trades (id, sniper_profile, symbol, entry_price, highest_price, qty, orig_qty, tp1_pct, tp2_pct, sl_pct, trailing_cb, tp1_hit, time_str)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO sniper_trades (id, sniper_profile, symbol, entry_price, highest_price, qty, orig_qty, tp1_pct, tp2_pct, sl_pct, trailing_cb, tp1_hit, time_str, entry_fee_rate)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         trade["id"], trade.get("sniper_profile", "SNIPER_1"), trade["symbol"], trade["entry_price"],
         trade.get("highest_price", trade["entry_price"]), trade["qty"], trade["qty"],
         trade.get("tp1_pct", 0.015), trade.get("tp2_pct", 0.030), trade.get("sl_pct", 0.010),
-        trade.get("trailing_cb", 0.006), 0, trade["time_str"]
+        trade.get("trailing_cb", 0.006), 0, trade["time_str"],
+        float(trade.get("entry_fee_rate", 0.001))
     ))
     conn.commit()
     conn.close()

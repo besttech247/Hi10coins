@@ -91,6 +91,7 @@ def init_trades_from_db():
             if bKey in shared_state["bots"]:
                 if sym not in shared_state["bots"][bKey]["active_positions"]:
                     shared_state["bots"][bKey]["active_positions"][sym] = []
+                meta = r.get("meta") or {}
                 shared_state["bots"][bKey]["active_positions"][sym].append({
                     "id": r.get("id"),
                     "entry_price": float(r.get("entry_price", 0.0)),
@@ -99,10 +100,11 @@ def init_trades_from_db():
                     "tp_pct": float(r.get("tp_pct", 0.025)),
                     "sl_pct": float(r.get("sl_pct", 0.012)),
                     "time": r.get("time_str", "--:--"),
-                    "timeframe": r.get("timeframe") or (r.get("meta") or {}).get("timeframe", ""),
-                    "meta": r.get("meta") or {},
-                    "be_armed": bool((r.get("meta") or {}).get("be_armed", False)),
-                    "trail_armed": bool((r.get("meta") or {}).get("trail_armed", False)),
+                    "timeframe": r.get("timeframe") or meta.get("timeframe", ""),
+                    "meta": meta,
+                    "entry_fee_rate": meta.get("entry_fee_rate"),
+                    "be_armed": bool(meta.get("be_armed", False)),
+                    "trail_armed": bool(meta.get("trail_armed", False)),
                 })
         shared_state["sniper_positions"] = database.load_sniper_trades()
     except Exception:
@@ -371,6 +373,86 @@ def position_notional(pos):
         return float(meta.get("trade_size_usdt"))
     return float(pos.get("entry_price", 0)) * float(pos.get("qty", 0))
 
+# Spot fee model: maker/chase ~0%, market/taker ~0.1% per side (estimate).
+MARKET_FEE_RATE = 0.001
+MAKER_FEE_RATE = 0.0
+
+def tag_order_fee_mode(res, fee_mode):
+    if isinstance(res, dict):
+        out = dict(res)
+        out["_fee_mode"] = fee_mode
+        return out
+    return res
+
+def resolve_fee_rate(exec_type=None, order_res=None):
+    """Prefer tagged/actual order mode; else bot exec_type; else market."""
+    if isinstance(order_res, dict):
+        mode = str(order_res.get("_fee_mode") or "").upper()
+        if mode in ("MARKET", "TAKER"):
+            return MARKET_FEE_RATE
+        if mode in ("CHASE_LIMIT", "LIMIT", "MAKER"):
+            return MAKER_FEE_RATE
+        ot = str(order_res.get("type") or "").upper()
+        if ot == "MARKET":
+            return MARKET_FEE_RATE
+        if ot == "LIMIT":
+            return MAKER_FEE_RATE
+    et = str(exec_type or "").upper()
+    if et == "CHASE_LIMIT":
+        return MAKER_FEE_RATE
+    return MARKET_FEE_RATE
+
+def resolve_fill(res, qty_hint=None, price_fallback=None):
+    """Average fill price and filled qty from exchange response."""
+    fallback_px = float(price_fallback) if price_fallback else None
+    hint_qty = float(qty_hint) if qty_hint else 0.0
+    if not isinstance(res, dict):
+        return fallback_px, hint_qty
+    quote = float(res.get("cummulativeQuoteQty") or 0.0)
+    filled = float(res.get("executedQty") or 0.0)
+    if filled <= 0 and hint_qty > 0:
+        filled = hint_qty
+    if quote > 0 and filled > 0:
+        return quote / filled, filled
+    return fallback_px, filled if filled > 0 else hint_qty
+
+def build_entry_from_fill(res, price_fallback, qty_hint, exec_type):
+    avg, filled = resolve_fill(res, qty_hint=qty_hint, price_fallback=price_fallback)
+    entry = float(avg if avg is not None else price_fallback)
+    qty = float(filled if filled and filled > 0 else qty_hint)
+    return entry, qty, resolve_fee_rate(exec_type, res)
+
+def position_entry_fee_rate(pos, fallback_exec_type=None):
+    if pos.get("entry_fee_rate") is not None:
+        try:
+            return float(pos.get("entry_fee_rate"))
+        except (TypeError, ValueError):
+            pass
+    meta = pos.get("meta") or {}
+    if meta.get("entry_fee_rate") is not None:
+        try:
+            return float(meta.get("entry_fee_rate"))
+        except (TypeError, ValueError):
+            pass
+    return resolve_fee_rate(fallback_exec_type)
+
+def calc_round_trip_pnl(entry, exit_px, qty, entry_fee_rate, exit_fee_rate):
+    entry = float(entry)
+    exit_px = float(exit_px)
+    qty = float(qty)
+    gross = (exit_px - entry) * qty
+    fee = (entry * qty * float(entry_fee_rate)) + (exit_px * qty * float(exit_fee_rate))
+    return gross, fee, gross - fee
+
+def settle_exit_pnl(entry, qty, order_res, bid_fallback, entry_fee_rate, exec_type=None):
+    exit_px, filled = resolve_fill(order_res, qty_hint=qty, price_fallback=bid_fallback or entry)
+    if exit_px is None:
+        exit_px = float(bid_fallback or entry)
+    sell_qty = float(filled if filled and filled > 0 else qty)
+    exit_fee = resolve_fee_rate(exec_type, order_res)
+    gross, fee, net = calc_round_trip_pnl(entry, exit_px, sell_qty, entry_fee_rate, exit_fee)
+    return exit_px, sell_qty, gross, fee, net
+
 def evaluate_coin_signals(ticker, source="FUTURES", tf="5m", vol_th=2.0, rsi_th=38.0):
     raw_sym = ticker["symbol"]
     spot_sym = raw_sym.replace("_", "")
@@ -470,23 +552,31 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
     ok, res = mexc_private_request("/api/v3/order", method="POST", params=params)
     if not ok:
         add_log(f"❌ خطأ {symbol}: {res}", "orders", "danger")
-    return ok, res
+        return ok, res
+    fee_mode = "MARKET" if order_type.upper() == "MARKET" else "LIMIT"
+    return True, tag_order_fee_mode(res, fee_mode)
 
 def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
     g_settings = database.get_global_settings()
     max_chase_secs = int(g_settings.get("chase_timeout", 12))
     interval_secs = float(g_settings.get("chase_interval", 2.0))
 
+    def market_fallback():
+        ok_m, res_m = place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
+        if ok_m:
+            return True, tag_order_fee_mode(res_m, "MARKET")
+        return ok_m, res_m
+
     bid, ask = get_orderbook(symbol)
     if not bid or not ask:
-        return place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
+        return market_fallback()
     
     order_price = bid if side.upper() == "BUY" else ask
     order_qty = qty if qty else (quote_qty / order_price if quote_qty else 0)
     
     ok, res = place_order(symbol, side, qty=order_qty, price=order_price, order_type="LIMIT")
     if not ok:
-        return place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
+        return market_fallback()
     
     order_id = res.get("orderId")
     start_t = time.time()
@@ -498,7 +588,7 @@ def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
         
         ok_chk, ord_info = mexc_private_request("/api/v3/order", params={"symbol": symbol, "orderId": order_id})
         if ok_chk and ord_info.get("status") == "FILLED":
-            return True, ord_info
+            return True, tag_order_fee_mode(ord_info, "CHASE_LIMIT")
         
         if best_price != order_price:
             mexc_private_request("/api/v3/order", method="DELETE", params={"symbol": symbol, "orderId": order_id})
@@ -510,7 +600,7 @@ def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
                 break
 
     mexc_private_request("/api/v3/order", method="DELETE", params={"symbol": symbol, "orderId": order_id})
-    return place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
+    return market_fallback()
 
 def refresh_wallet_and_prices():
     try:
@@ -634,22 +724,21 @@ def trading_engine_loop():
                     if half_qty > 0:
                         ok, res = place_order(sym, "SELL", qty=half_qty, order_type="MARKET")
                         if ok:
-                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                            real_exit = (usd_rec / half_qty) if (usd_rec > 0 and half_qty > 0) else bid
-                            gross_pnl = (real_exit - entry) * half_qty
-                            fee_usd = (entry * half_qty * 0.001) + (real_exit * half_qty * 0.001)
-                            net_pnl = gross_pnl - fee_usd
+                            entry_fee = position_entry_fee_rate(sp, "MARKET")
+                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                entry, half_qty, res, bid, entry_fee, "MARKET"
+                            )
 
                             database.archive_closed_trade({
                                 "id": f"{sp['id']}_tp1", "bot_name": prof_name, "symbol": sym,
                                 "entry_price": entry, "exit_price": real_exit,
-                                "qty": half_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                 "net_pnl": net_pnl, "reason": "🎯 TP1 (50% تأمين)",
                                 "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
                             })
 
                             sp["tp1_hit"] = 1
-                            sp["qty"] -= half_qty
+                            sp["qty"] -= sold_qty
                             database.update_sniper_trade(sp["id"], {"tp1_hit": 1, "qty": sp["qty"]})
                             add_log(f"🎯 [{prof_name}] بيع 50% لـ {sym} عند {real_exit}$ | ربح: {net_pnl:+.3f}$ وتأمين الدخول", "sells", "success")
 
@@ -670,16 +759,15 @@ def trading_engine_loop():
                     if float(format_quantity(sym, sell_qty)) > 0:
                         ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
                         if ok:
-                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                            real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
-                            gross_pnl = (real_exit - entry) * sell_qty
-                            fee_usd = (entry * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
-                            net_pnl = gross_pnl - fee_usd
+                            entry_fee = position_entry_fee_rate(sp, "MARKET")
+                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                entry, sell_qty, res, bid, entry_fee, "MARKET"
+                            )
 
                             database.archive_closed_trade({
                                 "id": sp["id"], "bot_name": prof_name, "symbol": sym,
                                 "entry_price": entry, "exit_price": real_exit,
-                                "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                 "net_pnl": net_pnl, "reason": reason,
                                 "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
                             })
@@ -777,12 +865,10 @@ def trading_engine_loop():
                                             ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
 
                                         if ok:
-                                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                                            real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
-                                            gross_pnl = (real_exit - pos['entry_price']) * sell_qty
-                                            fee_rate = 0.0 if exec_type == "CHASE_LIMIT" else 0.001
-                                            fee_usd = (pos['entry_price'] * sell_qty * fee_rate) + (real_exit * sell_qty * fee_rate)
-                                            net_pnl = gross_pnl - fee_usd
+                                            entry_fee = position_entry_fee_rate(pos, exec_type)
+                                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                                pos['entry_price'], sell_qty, res, bid, entry_fee, exec_type
+                                            )
                                             
                                             shared_state["bots"][bKey]["daily_pnl"] += net_pnl
                                             shared_state["bots"][bKey]["daily_pnl_coins"][sym] += net_pnl
@@ -792,10 +878,11 @@ def trading_engine_loop():
                                             database.archive_closed_trade({
                                                 "id": pos["id"], "bot_name": bKey, "symbol": sym,
                                                 "entry_price": pos["entry_price"], "exit_price": real_exit,
-                                                "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                                 "net_pnl": net_pnl, "reason": reason,
                                                 "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                             })
+                                            database.delete_active_trade(pos["id"])
                                             add_log(f"💰 [{bKey}] بيع {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                         else:
                                             if "30005" in str(res) or "Oversold" in str(res):
@@ -827,19 +914,22 @@ def trading_engine_loop():
                                                 LAST_ENTRY_CANDLE[lock_key] = latest_candle_time
                                                 trade_id = f"{bKey.lower()}_{int(time.time()*1000)}"
                                                 time_str = get_current_iso_time()
+                                                fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
                                                 t_obj = {
                                                     'id': trade_id, 'bot_name': bKey, 'symbol': sym,
-                                                    'entry_price': ask, 'highest_price': ask, 'qty': q,
+                                                    'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
                                                     'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct,
-                                                    'time_str': time_str
+                                                    'time_str': time_str,
+                                                    'meta': {'entry_fee_rate': entry_fee}
                                                 }
                                                 database.insert_active_trade(t_obj)
                                                 shared_state["bots"][bKey]["active_positions"][sym].append({
-                                                    'id': trade_id, 'entry_price': ask, 'highest_price': ask, 'qty': q,
-                                                    'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct, 'time': time_str
+                                                    'id': trade_id, 'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
+                                                    'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct, 'time': time_str,
+                                                    'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                                                 })
                                                 current_used_cap += size
-                                                add_log(f"🚀 [{bKey}] شراء {sym} عند {ask}$ ({exec_type})", "buys", "primary")
+                                                add_log(f"🚀 [{bKey}] شراء {sym} عند {fill_entry}$ ({exec_type})", "buys", "primary")
 
                     elif bKey in EXPERIMENTAL_BOTS:
                         tf = cfg.get("timeframe", "15m")
@@ -894,12 +984,10 @@ def trading_engine_loop():
                                     ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
 
                                 if ok:
-                                    usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                                    real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
-                                    gross_pnl = (real_exit - entry) * sell_qty
-                                    fee_rate = 0.0 if exec_type == "CHASE_LIMIT" else 0.001
-                                    fee_usd = (entry * sell_qty * fee_rate) + (real_exit * sell_qty * fee_rate)
-                                    net_pnl = gross_pnl - fee_usd
+                                    entry_fee = position_entry_fee_rate(pos, exec_type)
+                                    real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                        entry, sell_qty, res, bid, entry_fee, exec_type
+                                    )
 
                                     bot_state["daily_pnl"] += net_pnl
                                     bot_state["daily_pnl_coins"][sym] = bot_state["daily_pnl_coins"].get(sym, 0.0) + net_pnl
@@ -910,7 +998,7 @@ def trading_engine_loop():
                                     database.archive_closed_trade({
                                         "id": pos["id"], "bot_name": bKey, "symbol": sym,
                                         "entry_price": entry, "exit_price": real_exit,
-                                        "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                        "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                         "net_pnl": net_pnl, "reason": reason,
                                         "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
@@ -945,19 +1033,22 @@ def trading_engine_loop():
                                         LAST_ENTRY_CANDLE[lock_key] = latest_candle_time
                                         trade_id = f"{bKey.lower()}_{int(time.time()*1000)}"
                                         time_str = get_current_iso_time()
+                                        fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
                                         t_obj = {
                                             'id': trade_id, 'bot_name': bKey, 'symbol': sym,
-                                            'entry_price': ask, 'highest_price': ask, 'qty': q,
+                                            'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
                                             'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct,
-                                            'time_str': time_str
+                                            'time_str': time_str,
+                                            'meta': {'entry_fee_rate': entry_fee}
                                         }
                                         database.insert_active_trade(t_obj)
                                         bot_state["active_positions"][sym].append({
-                                            'id': trade_id, 'entry_price': ask, 'highest_price': ask, 'qty': q,
-                                            'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct, 'time': time_str
+                                            'id': trade_id, 'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
+                                            'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct, 'time': time_str,
+                                            'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                                         })
                                         current_used_cap += size
-                                        add_log(f"🧪 [{bKey}] شراء {sym} عند {ask}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
+                                        add_log(f"🧪 [{bKey}] شراء {sym} عند {fill_entry}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
 
                     elif bKey in MTF_BOTS:
                         bot_state = shared_state["bots"][bKey]
@@ -1057,12 +1148,10 @@ def trading_engine_loop():
                                     ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
 
                                 if ok:
-                                    usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                                    real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
-                                    gross_pnl = (real_exit - entry) * sell_qty
-                                    fee_rate = 0.0 if exec_type == "CHASE_LIMIT" else 0.001
-                                    fee_usd = (entry * sell_qty * fee_rate) + (real_exit * sell_qty * fee_rate)
-                                    net_pnl = gross_pnl - fee_usd
+                                    entry_fee = position_entry_fee_rate(pos, exec_type)
+                                    real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                        entry, sell_qty, res, bid, entry_fee, exec_type
+                                    )
                                     bot_state["daily_pnl"] += net_pnl
                                     bot_state["daily_pnl_coins"][sym] = bot_state["daily_pnl_coins"].get(sym, 0.0) + net_pnl
                                     bot_state["trades_count"] += 1
@@ -1071,7 +1160,7 @@ def trading_engine_loop():
                                     database.archive_closed_trade({
                                         "id": pos["id"], "bot_name": bKey, "symbol": sym,
                                         "entry_price": entry, "exit_price": real_exit,
-                                        "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                        "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                         "net_pnl": net_pnl, "reason": f"{reason} [{MTF_TF_LABELS.get(tf, tf)}]",
                                         "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
@@ -1146,6 +1235,7 @@ def trading_engine_loop():
                             id_pfx = "bot_ewo_mtfh" if hierarchical else "bot_ewo_mtf"
                             trade_id = f"{id_pfx}_{tf}_{int(time.time()*1000)}"
                             time_str = get_current_iso_time()
+                            fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
                             tp_pct = float(tf_cfg.get("tp_pct", 0.022))
                             sl_pct = float(tf_cfg.get("sl_pct", 0.010))
                             meta = {
@@ -1160,24 +1250,26 @@ def trading_engine_loop():
                                 "trail_cb_pct": float(tf_cfg.get("trail_cb_pct", 0.006)),
                                 "be_armed": False,
                                 "trail_armed": False,
-                                "hierarchical": hierarchical
+                                "hierarchical": hierarchical,
+                                "entry_fee_rate": entry_fee
                             }
                             t_obj = {
                                 "id": trade_id, "bot_name": bKey, "symbol": sym,
-                                "entry_price": ask, "highest_price": ask, "qty": q,
+                                "entry_price": fill_entry, "highest_price": fill_entry, "qty": fill_qty,
                                 "tp_pct": tp_pct, "sl_pct": sl_pct, "time_str": time_str,
                                 "timeframe": tf, "meta": meta
                             }
                             database.insert_active_trade(t_obj)
                             bot_state["active_positions"].setdefault(sym, []).append({
-                                "id": trade_id, "entry_price": ask, "highest_price": ask, "qty": q,
+                                "id": trade_id, "entry_price": fill_entry, "highest_price": fill_entry, "qty": fill_qty,
                                 "tp_pct": tp_pct, "sl_pct": sl_pct, "time": time_str,
-                                "timeframe": tf, "meta": meta, "be_armed": False, "trail_armed": False
+                                "timeframe": tf, "meta": meta, "entry_fee_rate": entry_fee,
+                                "be_armed": False, "trail_armed": False
                             })
                             open_count += 1
                             used_cap += size
                             mode_tag = "H+" if hierarchical else ""
-                            add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {ask}$ بحجم {size}$ ({exec_type})", "buys", "primary")
+                            add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {fill_entry}$ بحجم {size}$ ({exec_type})", "buys", "primary")
 
         except Exception as e:
             add_log(f"خطأ محرك التداول: {e}", "system", "warning")
@@ -1483,18 +1575,20 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     ok, res = place_order(sym, "BUY", qty=q, quote_qty=size, order_type="MARKET")
 
                 if ok:
+                    fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, o_type)
                     snp_id = f"snp_{int(time.time()*1000)}"
                     time_str = get_current_iso_time()
                     snp_trade = {
-                        "id": snp_id, "sniper_profile": prof, "symbol": sym, "entry_price": ask,
-                        "highest_price": ask, "qty": q, "orig_qty": q,
+                        "id": snp_id, "sniper_profile": prof, "symbol": sym, "entry_price": fill_entry,
+                        "highest_price": fill_entry, "qty": fill_qty, "orig_qty": fill_qty,
                         "tp1_pct": tp1_pct, "tp2_pct": tp2_pct,
                         "sl_pct": sl_pct, "trailing_cb": ts_cb,
-                        "tp1_hit": 0, "time_str": time_str
+                        "tp1_hit": 0, "time_str": time_str,
+                        "entry_fee_rate": entry_fee
                     }
                     database.insert_sniper_trade(snp_trade)
                     shared_state["sniper_positions"].append(snp_trade)
-                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {ask}$ (كمية: {q})"
+                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {fill_entry}$ (كمية: {fill_qty})"
                     add_log(msg, "buys", "primary")
                 else:
                     msg = f"❌ فشل القنص: {res}"
@@ -1514,19 +1608,19 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     sell_qty = min(sp["qty"], avail)
                     if float(format_quantity(sym, sell_qty)) > 0:
                         ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
-                        usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                        real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else (bid if bid else sp["entry_price"])
-                        gross_pnl = (real_exit - sp["entry_price"]) * sell_qty
-                        fee_usd = (sp["entry_price"] * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
-                        net_pnl = gross_pnl - fee_usd
+                        if ok:
+                            entry_fee = position_entry_fee_rate(sp, "MARKET")
+                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                sp["entry_price"], sell_qty, res, bid, entry_fee, "MARKET"
+                            )
                         
-                        database.archive_closed_trade({
-                            "id": s_id, "bot_name": sp.get("sniper_profile", "SNIPER_1"), "symbol": sym,
-                            "entry_price": sp["entry_price"], "exit_price": real_exit,
-                            "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
-                            "net_pnl": net_pnl, "reason": "إغلاق يدوي للقناص",
-                            "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
-                        })
+                            database.archive_closed_trade({
+                                "id": s_id, "bot_name": sp.get("sniper_profile", "SNIPER_1"), "symbol": sym,
+                                "entry_price": sp["entry_price"], "exit_price": real_exit,
+                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "net_pnl": net_pnl, "reason": "إغلاق يدوي للقناص",
+                                "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
+                            })
                     database.delete_sniper_trade(s_id)
                     add_log(f"🔥 تسييل صفقة قناص {sym} يدوي", "sells", "danger")
                     break
@@ -1645,21 +1739,24 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 if ok:
                     trade_id = f"{b_name.lower()}_{int(time.time()*1000)}"
                     time_str = get_current_iso_time()
+                    fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
                     t_obj = {
                         'id': trade_id, 'bot_name': b_name, 'symbol': sym,
-                        'entry_price': ask, 'highest_price': ask, 'qty': q,
+                        'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
                         'tp_pct': float(cfg.get("tp_pct", 0.025)),
                         'sl_pct': float(cfg.get("sl_pct", 0.012)),
-                        'time_str': time_str
+                        'time_str': time_str,
+                        'meta': {'entry_fee_rate': entry_fee}
                     }
                     database.insert_active_trade(t_obj)
                     if sym not in shared_state["bots"][b_name]["active_positions"]:
                         shared_state["bots"][b_name]["active_positions"][sym] = []
                     shared_state["bots"][b_name]["active_positions"][sym].append({
-                        'id': trade_id, 'entry_price': ask, 'highest_price': ask, 'qty': q,
-                        'tp_pct': t_obj['tp_pct'], 'sl_pct': t_obj['sl_pct'], 'time': time_str
+                        'id': trade_id, 'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
+                        'tp_pct': t_obj['tp_pct'], 'sl_pct': t_obj['sl_pct'], 'time': time_str,
+                        'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                     })
-                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {ask}$ ({exec_type})"
+                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {fill_entry}$ ({exec_type})"
                     add_log(msg, "buys", "primary")
                 else: msg = f"❌ فشل الشراء: {res}"
             else: msg = "فشل قراءة السعر"
@@ -1682,26 +1779,35 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     sell_qty = min(p['qty'], avail)
 
                     if float(format_quantity(sym, sell_qty)) > 0:
-                        ok, res = place_order(sym, "SELL", qty=sell_qty)
-                        usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                        real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else (bid if bid else p['entry_price'])
-                        gross_pnl = (real_exit - p['entry_price']) * sell_qty
-                        fee_usd = (p['entry_price'] * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
-                        net_pnl = gross_pnl - fee_usd
+                        cfg = database.get_bot_config(b_name)
+                        exec_type = cfg.get("order_exec_type", "CHASE_LIMIT")
+                        if exec_type == "CHASE_LIMIT":
+                            ok, res = execute_smart_chase_order(sym, "SELL", qty=sell_qty)
+                        else:
+                            ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+                        if ok:
+                            entry_fee = position_entry_fee_rate(p, exec_type)
+                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                p['entry_price'], sell_qty, res, bid, entry_fee, exec_type
+                            )
 
-                        shared_state["bots"][b_name]["daily_pnl"] += net_pnl
-                        shared_state["bots"][b_name]["daily_pnl_coins"][sym] += net_pnl
-                        shared_state["bots"][b_name]["trades_count"] += 1
-                        if net_pnl > 0: shared_state["bots"][b_name]["winning_count"] += 1
-                        
-                        database.archive_closed_trade({
-                            "id": pos_id, "bot_name": b_name, "symbol": sym,
-                            "entry_price": p["entry_price"], "exit_price": real_exit,
-                            "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
-                            "net_pnl": net_pnl, "reason": "يدوي (Manual)",
-                            "entry_time": p["time"], "exit_time": get_current_iso_time()
-                        })
-                        add_log(f"🔥 تسييل {sym} في {b_name} بسعر {real_exit}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
+                            shared_state["bots"][b_name]["daily_pnl"] += net_pnl
+                            shared_state["bots"][b_name]["daily_pnl_coins"][sym] = shared_state["bots"][b_name]["daily_pnl_coins"].get(sym, 0.0) + net_pnl
+                            shared_state["bots"][b_name]["trades_count"] += 1
+                            if net_pnl > 0: shared_state["bots"][b_name]["winning_count"] += 1
+                            
+                            database.archive_closed_trade({
+                                "id": pos_id, "bot_name": b_name, "symbol": sym,
+                                "entry_price": p["entry_price"], "exit_price": real_exit,
+                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "net_pnl": net_pnl, "reason": "يدوي (Manual)",
+                                "entry_time": p["time"], "exit_time": get_current_iso_time()
+                            })
+                            database.delete_active_trade(pos_id)
+                            add_log(f"🔥 تسييل {sym} في {b_name} بسعر {real_exit}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
+                        else:
+                            new_positions.append(p)
+                            continue
                     else:
                         database.delete_active_trade(pos_id)
                         add_log(f"⚠️ الرصيد 0، حذفت الصفقة", "system", "warning")
