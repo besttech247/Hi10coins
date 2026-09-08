@@ -99,6 +99,7 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
     <button class="tab" onclick="showTab('t-bot_x1', this)">🧪 X1</button>
     <button class="tab" onclick="showTab('t-bot_x2', this)">🧪 X2</button>
     <button class="tab" onclick="showTab('t-bot_x3', this)">🧪 X3</button>
+    <button class="tab" onclick="showTab('t-bot_ewo_mtf', this)">📐 MTF</button>
     <button class="tab" onclick="showTab('t-w', this)">💰 المحفظة</button>
   </div>
 
@@ -195,32 +196,95 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
   </details>
 
 <script>
-var BOT_DEFS = [
-  {key:'BOT_1', name:'🤖 Bot 1 (EWO 5m)', tf:'5m', isX:false},
-  {key:'BOT_2A', name:'⚡ Bot 2A (Scalp 15m)', tf:'15m', isX:false},
-  {key:'BOT_2B', name:'⚡ Bot 2B (Swing 1h)', tf:'60m', isX:false},
-  {key:'BOT_2C', name:'⚡ Bot 2C (Custom TF)', tf:'5m', isX:false},
-  {key:'BOT_X1', name:'🧪 Bot X1 (سريع 5m)', tf:'5m', isX:true},
-  {key:'BOT_X2', name:'🧪 Bot X2 (قياسي 15m)', tf:'15m', isX:true},
-  {key:'BOT_X3', name:'🧪 Bot X3 (أوسع 15m)', tf:'15m', isX:true}
+var MTF_TF_DEFS = [
+  {key:'5m', label:'5m'},
+  {key:'15m', label:'15m'},
+  {key:'30m', label:'30m'},
+  {key:'60m', label:'1h'},
+  {key:'4h', label:'4h'},
+  {key:'1d', label:'1d'}
 ];
+
+var BOT_DEFS = [
+  {key:'BOT_1', name:'🤖 Bot 1 (EWO 5m)', tf:'5m', isX:false, isMTF:false},
+  {key:'BOT_2A', name:'⚡ Bot 2A (Scalp 15m)', tf:'15m', isX:false, isMTF:false},
+  {key:'BOT_2B', name:'⚡ Bot 2B (Swing 1h)', tf:'60m', isX:false, isMTF:false},
+  {key:'BOT_2C', name:'⚡ Bot 2C (Custom TF)', tf:'5m', isX:false, isMTF:false},
+  {key:'BOT_X1', name:'🧪 Bot X1 (سريع 5m)', tf:'5m', isX:true, isMTF:false},
+  {key:'BOT_X2', name:'🧪 Bot X2 (قياسي 15m)', tf:'15m', isX:true, isMTF:false},
+  {key:'BOT_X3', name:'🧪 Bot X3 (أوسع 15m)', tf:'15m', isX:true, isMTF:false},
+  {key:'BOT_EWO_MTF', name:'📐 Bot EWO MTF', tf:'15m', isX:false, isMTF:true}
+];
+
+function buildMtfSettingsHtml(pfx){
+  var rows = '';
+  MTF_TF_DEFS.forEach(function(tf){
+    var id = pfx + '-mtf-' + tf.key;
+    rows += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:6px;background:#0b1220">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px">' +
+        '<label style="font-size:12px;font-weight:bold"><input type="checkbox" id="' + id + '-en" checked> تفعيل ' + tf.label + '</label>' +
+        '<span style="font-size:10px;color:var(--sub)">api: ' + tf.key + '</span>' +
+      '</div>' +
+      '<div class="form-row" style="padding:0">' +
+        '<div><label style="font-size:10px;color:var(--sub)">الحجم ($)</label><input type="number" id="' + id + '-size" step="1"></div>' +
+        '<div><label style="font-size:10px;color:var(--sub)">TP %</label><input type="number" id="' + id + '-tp" step="0.1"></div>' +
+        '<div><label style="font-size:10px;color:var(--sub)">SL %</label><input type="number" id="' + id + '-sl" step="0.1"></div>' +
+        '<div><label style="font-size:10px;color:var(--sub)">BE عند %</label><input type="number" id="' + id + '-be-tr" step="0.1"></div>' +
+        '<div><label style="font-size:10px;color:var(--sub)">Trail عند %</label><input type="number" id="' + id + '-tr-tr" step="0.1"></div>' +
+        '<div><label style="font-size:10px;color:var(--sub)">Trail CB %</label><input type="number" id="' + id + '-tr-cb" step="0.1"></div>' +
+        '<div><label style="font-size:10px;color:var(--sub)">Break-even</label><select id="' + id + '-be-en"><option value="1">مفعّل</option><option value="0">معطّل</option></select></div>' +
+        '<div><label style="font-size:10px;color:var(--sub)">Trailing</label><select id="' + id + '-tr-en"><option value="1">مفعّل</option><option value="0">معطّل</option></select></div>' +
+      '</div>' +
+    '</div>';
+  });
+  return rows +
+    '<div class="form-row" style="padding-top:4px">' +
+      '<div><label style="font-size:10px;color:var(--sub)">أقصى صفقات مفتوحة للبوت</label><input type="number" id="' + pfx + '-mtf-maxopen" value="4"></div>' +
+      '<div><label style="font-size:10px;color:var(--sub)">BE offset %</label><input type="number" id="' + pfx + '-mtf-beoff" value="0.1" step="0.05"></div>' +
+      '<div><label style="font-size:10px;color:var(--sub)">EWO exit min profit %</label><input type="number" id="' + pfx + '-mtf-ewomin" value="0.8" step="0.1"></div>' +
+    '</div>';
+}
 
 function buildBotMarkup(){
   var html = '';
   BOT_DEFS.forEach(function(b, idx){
     var pfx = b.key.toLowerCase();
     var activeCls = (idx === 0) ? 'active' : '';
-    var tfBlock =
-      '<div><label style="font-size:10px;color:var(--sub)">الفريم الزمني</label>' +
-      '<select id="' + pfx + '-tf">' +
-      '<option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="60m">1h</option>' +
-      '</select></div>';
-    var xExtra = b.isX ? (
-      '<div><label style="font-size:10px;color:var(--sub)">Trailing Stop</label>' +
-      '<select id="' + pfx + '-ts"><option value="1">مفعّل ✅</option><option value="0">معطّل ❌</option></select></div>' +
-      '<div><label style="font-size:10px;color:var(--sub)">Trailing CB %</label><input type="number" id="' + pfx + '-cb" value="0.6" step="0.1"></div>' +
-      '<div style="grid-column:1/-1;font-size:9.5px;color:var(--sub);padding:0 2px">دخول: EWO + تأكيد فريم أعلى 1h + (حجم أو RSI). خروج: TP / SL / Trailing / عكس EWO بعد ربح ≥ 0.8%</div>'
-    ) : '';
+    var settingsBody = '';
+    if(b.isMTF){
+      settingsBody =
+        '<div class="form-row" style="padding-top:8px">' +
+          '<div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="' + pfx + '-alloc" value="300"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="' + pfx + '-maxcon" value="2"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label><select id="' + pfx + '-ordtype"><option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option><option value="MARKET">سعر السوق (Market)</option></select></div>' +
+          '<div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg(\'' + b.key + '\', \'' + pfx + '\')">💾 حفظ</button></div>' +
+        '</div>' +
+        '<div style="padding:8px;font-size:9.5px;color:var(--sub)">EWO فقط لكل فريم بشكل مستقل. التأكيد الهرمي مؤجّل.</div>' +
+        '<div style="padding:0 8px 8px 8px">' + buildMtfSettingsHtml(pfx) + '</div>';
+    } else {
+      var tfBlock =
+        '<div><label style="font-size:10px;color:var(--sub)">الفريم الزمني</label>' +
+        '<select id="' + pfx + '-tf">' +
+        '<option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option><option value="30m">30m</option><option value="60m">1h</option>' +
+        '</select></div>';
+      var xExtra = b.isX ? (
+        '<div><label style="font-size:10px;color:var(--sub)">Trailing Stop</label>' +
+        '<select id="' + pfx + '-ts"><option value="1">مفعّل ✅</option><option value="0">معطّل ❌</option></select></div>' +
+        '<div><label style="font-size:10px;color:var(--sub)">Trailing CB %</label><input type="number" id="' + pfx + '-cb" value="0.6" step="0.1"></div>' +
+        '<div style="grid-column:1/-1;font-size:9.5px;color:var(--sub);padding:0 2px">دخول: EWO + تأكيد فريم أعلى 1h + (حجم أو RSI). خروج: TP / SL / Trailing / عكس EWO بعد ربح ≥ 0.8%</div>'
+      ) : '';
+      settingsBody =
+        '<div class="form-row" style="padding-top:8px">' +
+          '<div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="' + pfx + '-alloc" value="50"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="' + pfx + '-maxcon" value="1"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="' + pfx + '-size" value="10"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label><select id="' + pfx + '-ordtype"><option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option><option value="MARKET">سعر السوق (Market)</option><option value="LIMIT">أمر معلق (Limit)</option></select></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">هدف الربح (TP %)</label><input type="number" id="' + pfx + '-tp" value="2.5" step="0.1"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="' + pfx + '-sl" value="' + (b.isX ? '1.0' : '1.2') + '" step="0.1"></div>' +
+          tfBlock + xExtra +
+          '<div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg(\'' + b.key + '\', \'' + pfx + '\')">💾 حفظ</button></div>' +
+        '</div>';
+    }
 
     html += '<div id="t-' + pfx + '" class="tab-pane ' + activeCls + '">' +
       '<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">' +
@@ -240,17 +304,7 @@ function buildBotMarkup(){
       '</div>' +
       '<details class="card">' +
         '<summary style="color:#a78bfa">⚙️ الإعدادات وسقف رأس المال ▾</summary>' +
-        '<div class="form-row" style="padding-top:8px">' +
-          '<div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="' + pfx + '-alloc" value="50"></div>' +
-          '<div><label style="font-size:10px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="' + pfx + '-maxcon" value="1"></div>' +
-          '<div><label style="font-size:10px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="' + pfx + '-size" value="10"></div>' +
-          '<div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label><select id="' + pfx + '-ordtype"><option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option><option value="MARKET">سعر السوق (Market)</option><option value="LIMIT">أمر معلق (Limit)</option></select></div>' +
-          '<div><label style="font-size:10px;color:var(--sub)">هدف الربح (TP %)</label><input type="number" id="' + pfx + '-tp" value="2.5" step="0.1"></div>' +
-          '<div><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="' + pfx + '-sl" value="' + (b.isX ? '1.0' : '1.2') + '" step="0.1"></div>' +
-          tfBlock +
-          xExtra +
-          '<div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg(\'' + b.key + '\', \'' + pfx + '\')">💾 حفظ</button></div>' +
-        '</div>' +
+        settingsBody +
       '</details>' +
       '<details class="card" id="' + pfx + '-coins-card" open>' +
         '<summary style="display:flex;justify-content:space-between;align-items:center">' +
@@ -270,7 +324,7 @@ function buildBotMarkup(){
           '<button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage(\'' + pfx + '-orders-card\'); event.stopPropagation();">⚙️</button>' +
         '</summary>' +
         '<div style="overflow-x:auto;padding-top:6px">' +
-          '<table id="' + pfx + '-orders"><thead><tr><th onclick="sortTable(\'' + pfx + '-orders\', 0)" style="cursor:pointer">العملة ⇕</th><th onclick="sortTable(\'' + pfx + '-orders\', 1)" style="cursor:pointer">الدخول ⇕</th><th>الكمية</th><th onclick="sortTable(\'' + pfx + '-orders\', 3)" style="cursor:pointer">Live PnL ⇕</th><th>الوقت</th><th class="manage-ctrl">إجراءات</th></tr></thead><tbody></tbody></table>' +
+          '<table id="' + pfx + '-orders"><thead><tr><th>الفريم</th><th onclick="sortTable(\'' + pfx + '-orders\', 1)" style="cursor:pointer">العملة ⇕</th><th onclick="sortTable(\'' + pfx + '-orders\', 2)" style="cursor:pointer">الدخول ⇕</th><th>الكمية</th><th onclick="sortTable(\'' + pfx + '-orders\', 4)" style="cursor:pointer">Live PnL ⇕</th><th>الوقت</th><th class="manage-ctrl">إجراءات</th></tr></thead><tbody></tbody></table>' +
         '</div>' +
       '</details>' +
       '<details class="card">' +
@@ -395,25 +449,74 @@ async function removeCoinFromBot(botName, sym){
 }
 
 async function saveBotCfg(botName, prefix){
+  var botDef = BOT_DEFS.find(function(b){ return b.key === botName; }) || {};
   var payload = {
     bot_name: botName,
     max_allocation_usdt: parseFloat(document.getElementById(prefix+'-alloc').value)||50,
     max_concurrent_per_coin: parseInt(document.getElementById(prefix+'-maxcon').value)||1,
-    trade_size_usdt: parseFloat(document.getElementById(prefix+'-size').value)||10,
-    order_exec_type: document.getElementById(prefix+'-ordtype') ? document.getElementById(prefix+'-ordtype').value : 'CHASE_LIMIT',
-    tp_pct: (parseFloat(document.getElementById(prefix+'-tp').value)||2.5) / 100.0,
-    sl_pct: (parseFloat(document.getElementById(prefix+'-sl').value)||1.2) / 100.0
+    order_exec_type: document.getElementById(prefix+'-ordtype') ? document.getElementById(prefix+'-ordtype').value : 'CHASE_LIMIT'
   };
-  var tfEl = document.getElementById(prefix+'-tf');
-  if(tfEl) payload.timeframe = tfEl.value;
-  var tsEl = document.getElementById(prefix+'-ts');
-  if(tsEl) payload.trailing_stop = parseInt(tsEl.value);
-  var cbEl = document.getElementById(prefix+'-cb');
-  if(cbEl) payload.trailing_cb = (parseFloat(cbEl.value)||0.6) / 100.0;
+
+  if(botDef.isMTF){
+    var mtf = {_global:{}};
+    mtf._global.max_open_positions = parseInt(document.getElementById(prefix+'-mtf-maxopen').value)||4;
+    mtf._global.be_offset = (parseFloat(document.getElementById(prefix+'-mtf-beoff').value)||0.1)/100.0;
+    mtf._global.ewo_exit_min_profit = (parseFloat(document.getElementById(prefix+'-mtf-ewomin').value)||0.8)/100.0;
+    MTF_TF_DEFS.forEach(function(tf){
+      var id = prefix + '-mtf-' + tf.key;
+      mtf[tf.key] = {
+        enabled: !!(document.getElementById(id+'-en') && document.getElementById(id+'-en').checked),
+        trade_size_usdt: parseFloat(document.getElementById(id+'-size').value)||0,
+        tp_pct: (parseFloat(document.getElementById(id+'-tp').value)||0)/100.0,
+        sl_pct: (parseFloat(document.getElementById(id+'-sl').value)||0)/100.0,
+        be_trigger_pct: (parseFloat(document.getElementById(id+'-be-tr').value)||0)/100.0,
+        trail_trigger_pct: (parseFloat(document.getElementById(id+'-tr-tr').value)||0)/100.0,
+        trail_cb_pct: (parseFloat(document.getElementById(id+'-tr-cb').value)||0)/100.0,
+        be_enabled: document.getElementById(id+'-be-en').value === '1',
+        trail_enabled: document.getElementById(id+'-tr-en').value === '1'
+      };
+    });
+    payload.mtf_settings = mtf;
+    payload.trade_size_usdt = (mtf['15m'] && mtf['15m'].trade_size_usdt) || 25;
+    payload.tp_pct = (mtf['15m'] && mtf['15m'].tp_pct) || 0.022;
+    payload.sl_pct = (mtf['15m'] && mtf['15m'].sl_pct) || 0.010;
+    payload.timeframe = '15m';
+  } else {
+    payload.trade_size_usdt = parseFloat(document.getElementById(prefix+'-size').value)||10;
+    payload.tp_pct = (parseFloat(document.getElementById(prefix+'-tp').value)||2.5) / 100.0;
+    payload.sl_pct = (parseFloat(document.getElementById(prefix+'-sl').value)||1.2) / 100.0;
+    var tfEl = document.getElementById(prefix+'-tf');
+    if(tfEl) payload.timeframe = tfEl.value;
+    var tsEl = document.getElementById(prefix+'-ts');
+    if(tsEl) payload.trailing_stop = parseInt(tsEl.value);
+    var cbEl = document.getElementById(prefix+'-cb');
+    if(cbEl) payload.trailing_cb = (parseFloat(cbEl.value)||0.6) / 100.0;
+  }
 
   await fetch('/api/save_bot_config', {method:'POST', body:JSON.stringify(payload)});
   alert('✅ تم حفظ إعدادات ' + botName + '!');
   update();
+}
+
+function fillMtfSettings(prefix, mtf){
+  if(!mtf) return;
+  var g = mtf._global || {};
+  if(document.getElementById(prefix+'-mtf-maxopen')) document.getElementById(prefix+'-mtf-maxopen').value = g.max_open_positions || 4;
+  if(document.getElementById(prefix+'-mtf-beoff')) document.getElementById(prefix+'-mtf-beoff').value = ((g.be_offset || 0.001)*100).toFixed(2);
+  if(document.getElementById(prefix+'-mtf-ewomin')) document.getElementById(prefix+'-mtf-ewomin').value = ((g.ewo_exit_min_profit || 0.008)*100).toFixed(1);
+  MTF_TF_DEFS.forEach(function(tf){
+    var cfg = mtf[tf.key] || {};
+    var id = prefix + '-mtf-' + tf.key;
+    if(document.getElementById(id+'-en')) document.getElementById(id+'-en').checked = cfg.enabled !== false;
+    if(document.getElementById(id+'-size')) document.getElementById(id+'-size').value = cfg.trade_size_usdt || 0;
+    if(document.getElementById(id+'-tp')) document.getElementById(id+'-tp').value = ((cfg.tp_pct || 0)*100).toFixed(1);
+    if(document.getElementById(id+'-sl')) document.getElementById(id+'-sl').value = ((cfg.sl_pct || 0)*100).toFixed(1);
+    if(document.getElementById(id+'-be-tr')) document.getElementById(id+'-be-tr').value = ((cfg.be_trigger_pct || 0)*100).toFixed(1);
+    if(document.getElementById(id+'-tr-tr')) document.getElementById(id+'-tr-tr').value = ((cfg.trail_trigger_pct || 0)*100).toFixed(1);
+    if(document.getElementById(id+'-tr-cb')) document.getElementById(id+'-tr-cb').value = ((cfg.trail_cb_pct || 0)*100).toFixed(1);
+    if(document.getElementById(id+'-be-en')) document.getElementById(id+'-be-en').value = cfg.be_enabled ? '1' : '0';
+    if(document.getElementById(id+'-tr-en')) document.getElementById(id+'-tr-en').value = cfg.trail_enabled ? '1' : '0';
+  });
 }
 
 function downloadBotClosed(botName){
@@ -591,6 +694,7 @@ async function update(){
           if(document.getElementById(pfx+'-tf') && bObj.timeframe) document.getElementById(pfx+'-tf').value = bObj.timeframe;
           if(document.getElementById(pfx+'-ts') && bObj.trailing_stop !== undefined) document.getElementById(pfx+'-ts').value = bObj.trailing_stop;
           if(document.getElementById(pfx+'-cb') && bObj.trailing_cb !== undefined) document.getElementById(pfx+'-cb').value = (parseFloat(bObj.trailing_cb) * 100).toFixed(1);
+          if(bDef.isMTF) fillMtfSettings(pfx, bObj.mtf_settings || {});
         }
       });
       initialConfigsPopulated = true;
@@ -659,6 +763,7 @@ async function update(){
               var pnlColor = livePnlVal >= 0 ? 'var(--success)' : 'var(--danger)';
 
               posHtml += '<tr>' +
+                '<td style="font-size:10px;color:#93c5fd">' + (p.timeframe || (p.meta && p.meta.timeframe) || '-') + '</td>' +
                 '<td><strong>' + s + '</strong></td>' +
                 '<td>' + p.entry_price + '$</td>' +
                 '<td>' + p.qty + '</td>' +
@@ -677,7 +782,7 @@ async function update(){
         }
         var ordersTable = document.getElementById(pfx+'-orders');
         if(ordersTable){
-          ordersTable.querySelector('tbody').innerHTML = posHtml || '<tr><td colspan="6" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>';
+          ordersTable.querySelector('tbody').innerHTML = posHtml || '<tr><td colspan="7" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>';
         }
 
         fetch('/api/history?bot_name=' + bKey).then(function(r){ return r.json(); }).then(function(hList){
