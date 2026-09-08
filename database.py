@@ -1,9 +1,46 @@
+import os
 import sqlite3
 import hashlib
+import shutil
 
-DB_FILE = "bot_data.db"
+LEGACY_DB = "bot_data.db"
+
+
+def _resolve_db_file():
+    """Use DB_PATH or /data on Railway Volume; fall back to local file if needed."""
+    preferred = os.environ.get("DB_PATH", "/data/bot_data.db")
+    db_dir = os.path.dirname(preferred) or "."
+    try:
+        os.makedirs(db_dir, exist_ok=True)
+        test_path = os.path.join(db_dir, ".db_write_test")
+        with open(test_path, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(test_path)
+        return preferred
+    except OSError:
+        return LEGACY_DB
+
+
+DB_FILE = _resolve_db_file()
+
+
+def _ensure_db_location():
+    """Create DB directory and migrate a local bot_data.db once if present."""
+    db_dir = os.path.dirname(DB_FILE)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+    if (
+        DB_FILE != LEGACY_DB
+        and not os.path.exists(DB_FILE)
+        and os.path.exists(LEGACY_DB)
+        and os.path.getsize(LEGACY_DB) > 0
+    ):
+        shutil.copy2(LEGACY_DB, DB_FILE)
+
 
 def init_db():
+    _ensure_db_location()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
