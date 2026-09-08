@@ -48,6 +48,7 @@ shared_state = {
     "wallet_assets": [],
     "market_prices": {},
     "recent_logs": [],
+    "ops_alerts": [],
     "open_limit_orders": [],
     "sniper_positions": [],
     "start_timestamp": START_TIME,
@@ -73,6 +74,7 @@ for k in BOT_KEYS:
         "mtf_settings": database.DEFAULT_MTF_SETTINGS if is_mtf else {},
         "daily_pnl": 0.0,
         "daily_target": 5.0,
+        "daily_loss_limit": 5.0,
         "trades_count": 0,
         "winning_count": 0,
         "daily_pnl_coins": {},
@@ -120,6 +122,37 @@ def add_log(msg, category="system", log_type="info"):
     })
     if len(shared_state["recent_logs"]) > 250:
         shared_state["recent_logs"].pop()
+
+_ALERT_COOLDOWN = {}
+
+def push_ops_alert(kind, msg, cooldown_sec=180):
+    """Surface operational problems in UI + live log, with cooldown to avoid spam."""
+    now = time.time()
+    key = f"{kind}:{msg[:100]}"
+    last = _ALERT_COOLDOWN.get(key, 0)
+    if now - last < cooldown_sec:
+        return
+    _ALERT_COOLDOWN[key] = now
+    alert = {
+        "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        "kind": kind,
+        "msg": msg
+    }
+    alerts = shared_state.setdefault("ops_alerts", [])
+    alerts.insert(0, alert)
+    shared_state["ops_alerts"] = alerts[:40]
+    add_log(f"🚨 [{kind}] {msg}", "system", "danger")
+
+def bot_entries_allowed(bot_state):
+    """Gate new entries by daily profit target and daily loss limit."""
+    pnl = float(bot_state.get("daily_pnl", 0.0))
+    profit_cap = float(bot_state.get("daily_target", 5.0))
+    loss_cap = abs(float(bot_state.get("daily_loss_limit", 5.0)))
+    if pnl >= profit_cap:
+        return False, "profit_target"
+    if pnl <= -loss_cap:
+        return False, "loss_limit"
+    return True, None
 
 def fetch_server_ip():
     try:
@@ -561,7 +594,12 @@ def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
     max_chase_secs = int(g_settings.get("chase_timeout", 12))
     interval_secs = float(g_settings.get("chase_interval", 2.0))
 
-    def market_fallback():
+    def market_fallback(reason="timeout"):
+        push_ops_alert(
+            "chase_fallback",
+            f"Chase→Market على {symbol} {side} ({reason})",
+            cooldown_sec=60
+        )
         ok_m, res_m = place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
         if ok_m:
             return True, tag_order_fee_mode(res_m, "MARKET")
@@ -569,14 +607,14 @@ def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
 
     bid, ask = get_orderbook(symbol)
     if not bid or not ask:
-        return market_fallback()
+        return market_fallback("no_orderbook")
     
     order_price = bid if side.upper() == "BUY" else ask
     order_qty = qty if qty else (quote_qty / order_price if quote_qty else 0)
     
     ok, res = place_order(symbol, side, qty=order_qty, price=order_price, order_type="LIMIT")
     if not ok:
-        return market_fallback()
+        return market_fallback("limit_rejected")
     
     order_id = res.get("orderId")
     start_t = time.time()
@@ -600,7 +638,7 @@ def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
                 break
 
     mexc_private_request("/api/v3/order", method="DELETE", params={"symbol": symbol, "orderId": order_id})
-    return market_fallback()
+    return market_fallback("timeout")
 
 def refresh_wallet_and_prices():
     try:
@@ -653,6 +691,7 @@ def refresh_wallet_and_prices():
             shared_state["total_wallet_usd_value"] = total_val_usd
         else:
             shared_state["api_connected"] = False
+            push_ops_alert("api", "فشل الاتصال بـ MEXC account / المفاتيح أو الشبكة", cooldown_sec=300)
 
         ok_ord, open_ords = mexc_private_request("/api/v3/openOrders")
         if ok_ord and isinstance(open_ords, list):
@@ -797,9 +836,26 @@ def trading_engine_loop():
                 shared_state["bots"][bKey]["trailing_stop"] = int(cfg.get("trailing_stop", 1 if bKey in EXPERIMENTAL_BOTS or bKey in MTF_BOTS else 0))
                 shared_state["bots"][bKey]["trailing_cb"] = float(cfg.get("trailing_cb", 0.006))
                 shared_state["bots"][bKey]["symbols"] = syms
+                shared_state["bots"][bKey]["daily_target"] = float(cfg.get("daily_profit_target", 5.0))
+                shared_state["bots"][bKey]["daily_loss_limit"] = abs(float(cfg.get("daily_loss_limit", 5.0)))
                 if bKey in MTF_BOTS:
                     shared_state["bots"][bKey]["mtf_settings"] = get_mtf_settings(cfg)
                     shared_state["bots"][bKey]["max_allocation"] = float(cfg.get("max_allocation_usdt", 300.0))
+
+                allowed, lock_reason = bot_entries_allowed(shared_state["bots"][bKey])
+                if not allowed and cfg.get("status") == "RUNNING":
+                    if lock_reason == "loss_limit":
+                        push_ops_alert(
+                            "daily_loss",
+                            f"{bKey}: توقف الدخول — خسارة اليوم بلغت الحد {shared_state['bots'][bKey]['daily_loss_limit']}$",
+                            cooldown_sec=900
+                        )
+                    elif lock_reason == "profit_target":
+                        push_ops_alert(
+                            "daily_profit",
+                            f"{bKey}: توقف الدخول — تحقق هدف الربح اليومي {shared_state['bots'][bKey]['daily_target']}$",
+                            cooldown_sec=900
+                        )
 
                 for s in syms:
                     if s not in shared_state["bots"][bKey]["active_positions"]:
@@ -886,6 +942,7 @@ def trading_engine_loop():
                                             add_log(f"💰 [{bKey}] بيع {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                         else:
                                             if "30005" in str(res) or "Oversold" in str(res):
+                                                push_ops_alert("oversold", f"{bKey}: رصيد غير كافٍ لإغلاق {sym} (Oversold) — حُذفت من التتبع")
                                                 database.delete_active_trade(pos['id'])
                                             else:
                                                 still_pos.append(pos)
@@ -899,9 +956,9 @@ def trading_engine_loop():
                                 is_candle_locked = (LAST_ENTRY_CANDLE.get(lock_key) == latest_candle_time)
                                 can_open_coin = len(still_pos) < max_con
                                 can_open_alloc = (current_used_cap + size) <= max_alloc
-                                port_not_locked = shared_state["bots"][bKey]["daily_pnl"] < shared_state["bots"][bKey]["daily_target"]
+                                entries_ok, _lock = bot_entries_allowed(shared_state["bots"][bKey])
 
-                                if cfg.get("status") == "RUNNING" and sig_rebound and not is_candle_locked and can_open_coin and can_open_alloc and port_not_locked:
+                                if cfg.get("status") == "RUNNING" and sig_rebound and not is_candle_locked and can_open_coin and can_open_alloc and entries_ok:
                                     if shared_state["real_balance_usdt"] >= size:
                                         q = float(format_quantity(sym, size / ask))
                                         if q > 0:
@@ -930,6 +987,8 @@ def trading_engine_loop():
                                                 })
                                                 current_used_cap += size
                                                 add_log(f"🚀 [{bKey}] شراء {sym} عند {fill_entry}$ ({exec_type})", "buys", "primary")
+                                    else:
+                                        push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym} (مطلوب {size}$)", cooldown_sec=300)
 
                     elif bKey in EXPERIMENTAL_BOTS:
                         tf = cfg.get("timeframe", "15m")
@@ -1006,6 +1065,7 @@ def trading_engine_loop():
                                     add_log(f"💰 [{bKey}] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                 else:
                                     if "30005" in str(res) or "Oversold" in str(res):
+                                        push_ops_alert("oversold", f"{bKey}: رصيد غير كافٍ لإغلاق {sym} (Oversold) — حُذفت من التتبع")
                                         database.delete_active_trade(pos['id'])
                                     else:
                                         still_x.append(pos)
@@ -1018,10 +1078,10 @@ def trading_engine_loop():
                         is_candle_locked = (LAST_ENTRY_CANDLE.get(lock_key) == latest_candle_time)
                         can_open_coin = len(still_x) < max_con
                         can_open_alloc = (current_used_cap + size) <= max_alloc
-                        port_not_locked = bot_state["daily_pnl"] < bot_state["daily_target"]
+                        entries_ok, _lock = bot_entries_allowed(bot_state)
                         entry_ready = bot_x_entry_ok(candles) and bot_x_htf_ok(sym, "60m")
 
-                        if cfg.get("status") == "RUNNING" and entry_ready and not is_candle_locked and can_open_coin and can_open_alloc and port_not_locked:
+                        if cfg.get("status") == "RUNNING" and entry_ready and not is_candle_locked and can_open_coin and can_open_alloc and entries_ok:
                             if shared_state["real_balance_usdt"] >= size:
                                 q = float(format_quantity(sym, size / ask))
                                 if q > 0:
@@ -1049,6 +1109,8 @@ def trading_engine_loop():
                                         })
                                         current_used_cap += size
                                         add_log(f"🧪 [{bKey}] شراء {sym} عند {fill_entry}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
+                            else:
+                                push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym} (مطلوب {size}$)", cooldown_sec=300)
 
                     elif bKey in MTF_BOTS:
                         bot_state = shared_state["bots"][bKey]
@@ -1170,6 +1232,7 @@ def trading_engine_loop():
                                     used_cap = max(0.0, used_cap - position_notional(pos))
                                 else:
                                     if "30005" in str(res) or "Oversold" in str(res):
+                                        push_ops_alert("oversold", f"{bKey}: رصيد غير كافٍ لإغلاق {sym} (Oversold) — حُذفت من التتبع")
                                         database.delete_active_trade(pos["id"])
                                     else:
                                         still_sym.append(pos)
@@ -1181,8 +1244,8 @@ def trading_engine_loop():
                         # Entries per enabled timeframe
                         if cfg.get("status") != "RUNNING":
                             continue
-                        port_not_locked = bot_state["daily_pnl"] < bot_state["daily_target"]
-                        if not port_not_locked:
+                        entries_ok, _lock = bot_entries_allowed(bot_state)
+                        if not entries_ok:
                             continue
 
                         for tf in MTF_TF_ORDER:
@@ -1204,6 +1267,7 @@ def trading_engine_loop():
                             if (used_cap + size) > max_alloc:
                                 continue
                             if shared_state["real_balance_usdt"] < size:
+                                push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym}/{tf} (مطلوب {size}$)", cooldown_sec=300)
                                 continue
 
                             candles = fetch_klines(sym, interval=tf, limit=45)

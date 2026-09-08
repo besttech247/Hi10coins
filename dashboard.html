@@ -72,6 +72,8 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
     </nav>
   </header>
 
+  <div id="ops-alerts" style="display:none;margin-bottom:6px"></div>
+
   <details id="keys-box">
     <summary style="color:#60a5fa">🔑 إعدادات المفاتيح و IP السيرفر ▾ <span id="keys-status-badge"></span></summary>
     <div style="padding:8px">
@@ -255,6 +257,8 @@ function buildBotMarkup(){
         '<div class="form-row" style="padding-top:8px">' +
           '<div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="' + pfx + '-alloc" value="300"></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="' + pfx + '-maxcon" value="2"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">هدف ربح يومي ($)</label><input type="number" id="' + pfx + '-dprofit" value="5" step="0.5"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">حد خسارة يومي ($)</label><input type="number" id="' + pfx + '-dloss" value="5" step="0.5"></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label><select id="' + pfx + '-ordtype"><option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option><option value="MARKET">سعر السوق (Market)</option></select></div>' +
           '<div style="display:flex;align-items:flex-end"><button class="btn" style="background:var(--primary);color:#fff;width:100%" onclick="saveBotCfg(\'' + b.key + '\', \'' + pfx + '\')">💾 حفظ</button></div>' +
         '</div>' +
@@ -277,6 +281,8 @@ function buildBotMarkup(){
           '<div><label style="font-size:10px;color:var(--sub)">سقف رأس المال ($)</label><input type="number" id="' + pfx + '-alloc" value="50"></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">أقصى صفقات/عملة</label><input type="number" id="' + pfx + '-maxcon" value="1"></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">حجم الصفقة ($)</label><input type="number" id="' + pfx + '-size" value="10"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">هدف ربح يومي ($)</label><input type="number" id="' + pfx + '-dprofit" value="5" step="0.5"></div>' +
+          '<div><label style="font-size:10px;color:var(--sub)">حد خسارة يومي ($)</label><input type="number" id="' + pfx + '-dloss" value="5" step="0.5"></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">نوع الأمر</label><select id="' + pfx + '-ordtype"><option value="CHASE_LIMIT">متتبع ليميت (Chase 0% Fee)</option><option value="MARKET">سعر السوق (Market)</option><option value="LIMIT">أمر معلق (Limit)</option></select></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">هدف الربح (TP %)</label><input type="number" id="' + pfx + '-tp" value="2.5" step="0.1"></div>' +
           '<div><label style="font-size:10px;color:var(--sub)">وقف الخسارة (SL %)</label><input type="number" id="' + pfx + '-sl" value="' + (b.isX ? '1.0' : '1.2') + '" step="0.1"></div>' +
@@ -453,7 +459,9 @@ async function saveBotCfg(botName, prefix){
     bot_name: botName,
     max_allocation_usdt: parseFloat(document.getElementById(prefix+'-alloc').value)||50,
     max_concurrent_per_coin: parseInt(document.getElementById(prefix+'-maxcon').value)||1,
-    order_exec_type: document.getElementById(prefix+'-ordtype') ? document.getElementById(prefix+'-ordtype').value : 'CHASE_LIMIT'
+    order_exec_type: document.getElementById(prefix+'-ordtype') ? document.getElementById(prefix+'-ordtype').value : 'CHASE_LIMIT',
+    daily_profit_target: parseFloat(document.getElementById(prefix+'-dprofit').value)||5,
+    daily_loss_limit: Math.abs(parseFloat(document.getElementById(prefix+'-dloss').value)||5)
   };
 
   if(botDef.isMTF){
@@ -693,10 +701,29 @@ async function update(){
           if(document.getElementById(pfx+'-tf') && bObj.timeframe) document.getElementById(pfx+'-tf').value = bObj.timeframe;
           if(document.getElementById(pfx+'-ts') && bObj.trailing_stop !== undefined) document.getElementById(pfx+'-ts').value = bObj.trailing_stop;
           if(document.getElementById(pfx+'-cb') && bObj.trailing_cb !== undefined) document.getElementById(pfx+'-cb').value = (parseFloat(bObj.trailing_cb) * 100).toFixed(1);
+          if(document.getElementById(pfx+'-dprofit') && bObj.daily_target !== undefined) document.getElementById(pfx+'-dprofit').value = bObj.daily_target;
+          if(document.getElementById(pfx+'-dloss') && bObj.daily_loss_limit !== undefined) document.getElementById(pfx+'-dloss').value = bObj.daily_loss_limit;
           if(bDef.isMTF) fillMtfSettings(pfx, bObj.mtf_settings || {});
         }
       });
       initialConfigsPopulated = true;
+    }
+
+    var alertsBox = document.getElementById('ops-alerts');
+    if(alertsBox){
+      var alerts = d.ops_alerts || [];
+      if(alerts.length){
+        alertsBox.style.display = 'block';
+        alertsBox.innerHTML = alerts.slice(0, 5).map(function(a){
+          return '<div style="background:#3f1d1d;border:1px solid #7f1d1d;color:#fecaca;border-radius:8px;padding:6px 8px;margin-bottom:4px;font-size:11px">' +
+            '<strong style="color:#fca5a5">🚨 ' + (a.kind || 'alert') + '</strong> <span style="color:#94a3b8;font-size:10px">' + (a.time || '') + '</span><br>' +
+            (a.msg || '') +
+          '</div>';
+        }).join('');
+      } else {
+        alertsBox.style.display = 'none';
+        alertsBox.innerHTML = '';
+      }
     }
 
     BOT_DEFS.forEach(function(bDef){
@@ -794,7 +821,7 @@ async function update(){
           ordersTable.querySelector('tbody').innerHTML = posHtml || '<tr><td colspan="7" style="text-align:center;color:var(--sub)">لا توجد صفقات</td></tr>';
         }
 
-        fetch('/api/history?bot_name=' + bKey).then(function(r){ return r.json(); }).then(function(hList){
+        fetch('/api/history?bot_name=' + encodeURIComponent(bKey) + '&limit=200').then(function(r){ return r.json(); }).then(function(hList){
           var hHtml = '';
           hList.forEach(function(h){
             var netColor = h.net_pnl >= 0 ? 'var(--success)' : 'var(--danger)';

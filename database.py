@@ -164,6 +164,8 @@ def init_db():
     """)
 
     _ensure_column(cursor, "bots_config", "mtf_settings", "TEXT DEFAULT ''")
+    _ensure_column(cursor, "bots_config", "daily_profit_target", "REAL DEFAULT 5.0")
+    _ensure_column(cursor, "bots_config", "daily_loss_limit", "REAL DEFAULT 5.0")
     _ensure_column(cursor, "active_trades", "timeframe", "TEXT DEFAULT ''")
     _ensure_column(cursor, "active_trades", "meta_json", "TEXT DEFAULT '{}'")
     _ensure_column(cursor, "sniper_trades", "entry_fee_rate", "REAL DEFAULT 0.001")
