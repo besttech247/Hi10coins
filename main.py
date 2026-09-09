@@ -27,8 +27,17 @@ ssl_ctx = ssl._create_unverified_context()
 START_TIME = time.time()
 
 SYMBOL_RULES = {}
+UNSUPPORTED_API_SYMBOLS = set()
+MIN_SELL_NOTIONAL_USDT = 1.0
 LAST_ENTRY_CANDLE = {}
-BOT_KEYS = ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C", "BOT_3"]
+BOT_KEYS = ["BOT_1", "BOT_X1", "BOT_X2", "BOT_X3", "BOT_EWO_MTF", "BOT_EWO_MTFH"]
+CLASSIC_BOTS = ["BOT_1"]
+EXPERIMENTAL_BOTS = ["BOT_X1", "BOT_X2", "BOT_X3"]
+MTF_BOT = "BOT_EWO_MTF"
+MTFH_BOT = "BOT_EWO_MTFH"
+MTF_BOTS = [MTF_BOT, MTFH_BOT]
+MTF_TF_ORDER = ["5m", "15m", "30m", "60m", "4h", "1d"]
+MTF_TF_LABELS = {"5m": "5m", "15m": "15m", "30m": "30m", "60m": "1h", "4h": "4h", "1d": "1d"}
 
 shared_state = {
     "api_connected": False,
@@ -41,6 +50,7 @@ shared_state = {
     "wallet_assets": [],
     "market_prices": {},
     "recent_logs": [],
+    "ops_alerts": [],
     "open_limit_orders": [],
     "sniper_positions": [],
     "start_timestamp": START_TIME,
@@ -49,19 +59,24 @@ shared_state = {
 }
 
 for k in BOT_KEYS:
+    is_mtf = k in MTF_BOTS
     shared_state["bots"][k] = {
         "name": k,
         "status": "PAUSED",
         "symbols": [],
-        "order_exec_type": "CHASE_LIMIT" if k != "BOT_3" else "MARKET",
-        "max_allocation": 50.0,
-        "max_concurrent": 1,
-        "trade_size": 10.0,
+        "order_exec_type": "CHASE_LIMIT",
+        "max_allocation": 300.0 if is_mtf else 50.0,
+        "max_concurrent": 2 if is_mtf else 1,
+        "trade_size": 15.0 if is_mtf else 10.0,
         "tp_pct": 2.5,
         "sl_pct": 1.2,
         "timeframe": "15m",
+        "trailing_stop": 1 if (k in EXPERIMENTAL_BOTS or is_mtf) else 0,
+        "trailing_cb": 0.006,
+        "mtf_settings": database.DEFAULT_MTF_SETTINGS if is_mtf else {},
         "daily_pnl": 0.0,
         "daily_target": 5.0,
+        "daily_loss_limit": 5.0,
         "trades_count": 0,
         "winning_count": 0,
         "daily_pnl_coins": {},
@@ -80,6 +95,7 @@ def init_trades_from_db():
             if bKey in shared_state["bots"]:
                 if sym not in shared_state["bots"][bKey]["active_positions"]:
                     shared_state["bots"][bKey]["active_positions"][sym] = []
+                meta = r.get("meta") or {}
                 shared_state["bots"][bKey]["active_positions"][sym].append({
                     "id": r.get("id"),
                     "entry_price": float(r.get("entry_price", 0.0)),
@@ -87,7 +103,12 @@ def init_trades_from_db():
                     "qty": float(r.get("qty", 0.0)),
                     "tp_pct": float(r.get("tp_pct", 0.025)),
                     "sl_pct": float(r.get("sl_pct", 0.012)),
-                    "time": r.get("time_str", "--:--")
+                    "time": r.get("time_str", "--:--"),
+                    "timeframe": r.get("timeframe") or meta.get("timeframe", ""),
+                    "meta": meta,
+                    "entry_fee_rate": meta.get("entry_fee_rate"),
+                    "be_armed": bool(meta.get("be_armed", False)),
+                    "trail_armed": bool(meta.get("trail_armed", False)),
                 })
         shared_state["sniper_positions"] = database.load_sniper_trades()
     except Exception:
@@ -103,6 +124,156 @@ def add_log(msg, category="system", log_type="info"):
     })
     if len(shared_state["recent_logs"]) > 250:
         shared_state["recent_logs"].pop()
+
+_ALERT_COOLDOWN = {}
+
+def push_ops_alert(kind, msg, cooldown_sec=180):
+    """Surface operational problems in UI + live log, with cooldown to avoid spam."""
+    now = time.time()
+    key = f"{kind}:{msg[:100]}"
+    last = _ALERT_COOLDOWN.get(key, 0)
+    if now - last < cooldown_sec:
+        return
+    _ALERT_COOLDOWN[key] = now
+    alert = {
+        "time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        "kind": kind,
+        "msg": msg
+    }
+    alerts = shared_state.setdefault("ops_alerts", [])
+    alerts.insert(0, alert)
+    shared_state["ops_alerts"] = alerts[:40]
+    add_log(f"🚨 [{kind}] {msg}", "system", "danger")
+
+def bot_entries_allowed(bot_state):
+    """Gate new entries by daily profit target and daily loss limit."""
+    pnl = float(bot_state.get("daily_pnl", 0.0))
+    profit_cap = float(bot_state.get("daily_target", 5.0))
+    loss_cap = abs(float(bot_state.get("daily_loss_limit", 5.0)))
+    if pnl >= profit_cap:
+        return False, "profit_target"
+    if pnl <= -loss_cap:
+        return False, "loss_limit"
+    return True, None
+
+def _fmt_setting_val(v):
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    if isinstance(v, bool):
+        return "on" if v else "off"
+    return str(v)
+
+def summarize_bot_config_changes(bot_name, before, after):
+    """Build detailed Arabic change lines for the live log."""
+    lines = []
+    label_map = {
+        "max_allocation_usdt": "سقف رأس المال",
+        "max_concurrent_per_coin": "أقصى صفقات/عملة",
+        "trade_size_usdt": "حجم الصفقة",
+        "order_exec_type": "نوع الأمر",
+        "timeframe": "الفريم",
+        "tp_pct": "TP",
+        "sl_pct": "SL",
+        "trailing_stop": "Trailing",
+        "trailing_cb": "Trailing CB",
+        "daily_profit_target": "هدف ربح يومي",
+        "daily_loss_limit": "حد خسارة يومي",
+        "status": "الحالة",
+        "symbols": "الرموز",
+    }
+    for key, label in label_map.items():
+        if key not in after:
+            continue
+        old = before.get(key)
+        new = after.get(key)
+        if old is None and new is None:
+            continue
+        try:
+            if isinstance(new, (int, float)) or isinstance(old, (int, float)):
+                if float(old or 0) == float(new or 0):
+                    continue
+            elif str(old) == str(new):
+                continue
+        except Exception:
+            if str(old) == str(new):
+                continue
+        # Show percents more readably for tp/sl/cb
+        if key in ("tp_pct", "sl_pct", "trailing_cb") and new is not None:
+            try:
+                old_s = f"{float(old or 0)*100:.2f}%"
+                new_s = f"{float(new)*100:.2f}%"
+            except Exception:
+                old_s, new_s = _fmt_setting_val(old), _fmt_setting_val(new)
+        else:
+            old_s, new_s = _fmt_setting_val(old), _fmt_setting_val(new)
+        lines.append(f"{label}: {old_s} → {new_s}")
+
+    old_mtf = before.get("mtf_settings") if isinstance(before.get("mtf_settings"), dict) else {}
+    new_mtf = after.get("mtf_settings") if isinstance(after.get("mtf_settings"), dict) else {}
+    if new_mtf:
+        old_g = (old_mtf or {}).get("_global") or {}
+        new_g = new_mtf.get("_global") or {}
+        for gk, glabel in (
+            ("max_open_positions", "أقصى صفقات مفتوحة"),
+            ("be_offset", "BE offset"),
+            ("ewo_exit_min_profit", "EWO exit min"),
+        ):
+            if gk in new_g and float(old_g.get(gk, -1) or -1) != float(new_g.get(gk) or 0):
+                if gk in ("be_offset", "ewo_exit_min_profit"):
+                    lines.append(f"{glabel}: {float(old_g.get(gk, 0))*100:.2f}% → {float(new_g.get(gk, 0))*100:.2f}%")
+                else:
+                    lines.append(f"{glabel}: {old_g.get(gk)} → {new_g.get(gk)}")
+
+        for tf in MTF_TF_ORDER:
+            o = (old_mtf or {}).get(tf) or {}
+            n = new_mtf.get(tf) or {}
+            if not n:
+                continue
+            tf_lab = MTF_TF_LABELS.get(tf, tf)
+            checks = [
+                ("enabled", "تفعيل"),
+                ("trade_size_usdt", "حجم"),
+                ("tp_pct", "TP"),
+                ("sl_pct", "SL"),
+                ("be_enabled", "BE"),
+                ("be_trigger_pct", "BE@"),
+                ("trail_enabled", "Trail"),
+                ("trail_trigger_pct", "Trail@"),
+                ("trail_cb_pct", "TrailCB"),
+                ("hierarchy_parent", "فلتر هرمي"),
+            ]
+            for ck, clabel in checks:
+                if ck not in n:
+                    continue
+                ov, nv = o.get(ck), n.get(ck)
+                changed = False
+                if ck in ("tp_pct", "sl_pct", "be_trigger_pct", "trail_trigger_pct", "trail_cb_pct"):
+                    try:
+                        changed = abs(float(ov or 0) - float(nv or 0)) > 1e-12
+                    except Exception:
+                        changed = str(ov) != str(nv)
+                elif ck == "hierarchy_parent":
+                    changed = database.normalize_hierarchy_parent(tf, ov) != database.normalize_hierarchy_parent(tf, nv)
+                else:
+                    changed = ov != nv
+                if not changed:
+                    continue
+                if ck == "hierarchy_parent":
+                    old_p = database.normalize_hierarchy_parent(tf, ov)
+                    new_p = database.normalize_hierarchy_parent(tf, nv)
+                    old_s = "off" if old_p == "off" else MTF_TF_LABELS.get(old_p, old_p)
+                    new_s = "off" if new_p == "off" else MTF_TF_LABELS.get(new_p, new_p)
+                    lines.append(f"[{tf_lab}] {clabel}: {old_s} → {new_s}")
+                elif ck in ("tp_pct", "sl_pct", "be_trigger_pct", "trail_trigger_pct", "trail_cb_pct"):
+                    lines.append(f"[{tf_lab}] {clabel}: {float(ov or 0)*100:.2f}% → {float(nv or 0)*100:.2f}%")
+                elif ck in ("enabled", "be_enabled", "trail_enabled"):
+                    lines.append(f"[{tf_lab}] {clabel}: {'on' if ov else 'off'} → {'on' if nv else 'off'}")
+                else:
+                    lines.append(f"[{tf_lab}] {clabel}: {ov} → {nv}")
+
+    if not lines:
+        return [f"تم حفظ إعدادات {bot_name} (بدون تغيير ملحوظ)"]
+    return [f"تم حفظ إعدادات {bot_name}:"] + lines
 
 def fetch_server_ip():
     try:
@@ -167,7 +338,8 @@ def mexc_private_request(endpoint, method="GET", params=None):
         return False, str(e)
 
 def update_exchange_info(symbol):
-    if symbol in SYMBOL_RULES: return
+    if symbol in SYMBOL_RULES:
+        return
     try:
         url = f"{BASE_URL}/api/v3/exchangeInfo?symbol={symbol}"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -177,11 +349,58 @@ def update_exchange_info(symbol):
                 if s["symbol"] == symbol:
                     base_prec = int(s.get("baseAssetPrecision", 2))
                     quote_prec = int(s.get("quotePrecision", 4))
-                    SYMBOL_RULES[symbol] = {"base_prec": base_prec, "quote_prec": quote_prec}
+                    status = str(s.get("status", "ENABLED")).upper()
+                    supported = status in ("ENABLED", "1", "TRUE", "")
+                    SYMBOL_RULES[symbol] = {
+                        "base_prec": base_prec,
+                        "quote_prec": quote_prec,
+                        "supported": supported
+                    }
+                    if not supported:
+                        UNSUPPORTED_API_SYMBOLS.add(symbol)
                     return
+            # exchange answered but symbol missing → not API-tradable
+            SYMBOL_RULES[symbol] = {"base_prec": 2, "quote_prec": 4, "supported": False}
+            UNSUPPORTED_API_SYMBOLS.add(symbol)
     except Exception:
-        pass
-    SYMBOL_RULES[symbol] = {"base_prec": 2, "quote_prec": 4}
+        # Network/parse failure: keep provisional rules, do not blacklist permanently
+        SYMBOL_RULES[symbol] = {"base_prec": 2, "quote_prec": 4, "supported": True}
+
+def symbol_api_supported(symbol):
+    if symbol in UNSUPPORTED_API_SYMBOLS:
+        return False
+    update_exchange_info(symbol)
+    return bool(SYMBOL_RULES.get(symbol, {}).get("supported", True))
+
+def asset_to_usdt_symbol(asset):
+    asset = str(asset or "").strip()
+    if not asset or asset in ("USDT", "USDC"):
+        return None
+    # Skip non-standard wallet names like GOLD(XAUT)
+    if any(ch in asset for ch in "()[]{}/\\ "):
+        return None
+    return f"{asset}USDT"
+
+def can_market_sell_wallet_asset(asset_row, min_notional=MIN_SELL_NOTIONAL_USDT):
+    """
+    Pre-check before dust/panic sells.
+    Returns (True, symbol) or (False, reason_code).
+    """
+    asset = asset_row.get("asset")
+    free_qty = float(asset_row.get("free", 0.0) or 0.0)
+    val_usd = float(asset_row.get("usd_value", 0.0) or 0.0)
+    if asset in ("USDT", "USDC"):
+        return False, "stable"
+    if free_qty <= 0:
+        return False, "zero"
+    sym = asset_to_usdt_symbol(asset)
+    if not sym:
+        return False, "bad_symbol"
+    if val_usd < float(min_notional):
+        return False, "below_min"
+    if not symbol_api_supported(sym):
+        return False, "unsupported"
+    return True, sym
 
 def format_quantity(symbol, qty):
     update_exchange_info(symbol)
@@ -278,6 +497,256 @@ def calculate_ewo(candles):
         vals.append(sma5 - sma35)
     return vals[0], vals[1], vals[2]
 
+def calculate_ewo_series(candles):
+    """Full EWO histogram series aligned with candles (None until enough history)."""
+    if not candles:
+        return []
+    medians = [(float(c["high"]) + float(c["low"])) / 2.0 for c in candles]
+    out = []
+    for i in range(len(medians)):
+        if i + 1 < 35:
+            out.append(None)
+            continue
+        sub = medians[: i + 1]
+        sma5 = sum(sub[-5:]) / 5.0
+        sma35 = sum(sub[-35:]) / 35.0
+        out.append(sma5 - sma35)
+    return out
+
+def build_ewo_chart_payload(symbol, limit=80):
+    """Multi-TF EWO payload for the charts page."""
+    sym = sanitize_str(symbol).upper()
+    if sym and not (sym.endswith("USDT") or sym.endswith("USDC")):
+        sym = f"{sym}USDT"
+    limit = max(45, min(int(limit or 80), 150))
+    bid, ask = get_orderbook(sym)
+    frames = {}
+    for tf in MTF_TF_ORDER:
+        candles = fetch_klines(sym, interval=tf, limit=limit)
+        ewo = calculate_ewo_series(candles) if candles else []
+        e3, e2, e1 = calculate_ewo(candles) if candles and len(candles) >= 38 else (None, None, None)
+        rebound = bool(e1 is not None and e2 is not None and e3 is not None and (e1 < 0 and e1 > e2 and e2 <= e3))
+        supportive = bool(e1 is not None and e2 is not None and ((e1 >= e2) or (e1 > 0)))
+        frames[tf] = {
+            "label": MTF_TF_LABELS.get(tf, tf),
+            "times": [c.get("time") for c in (candles or [])],
+            "closes": [round(float(c.get("close", 0)), 8) for c in (candles or [])],
+            "ewo": [None if v is None else round(float(v), 8) for v in ewo],
+            "e3": e3,
+            "e2": e2,
+            "e1": e1,
+            "rebound": rebound,
+            "supportive": supportive,
+            "count": len(candles or [])
+        }
+    return {
+        "symbol": sym,
+        "bid": bid,
+        "ask": ask,
+        "timeframes": frames
+    }
+
+def candle_vol_mult(candles):
+    if not candles or len(candles) < 5:
+        return 0.0
+    vols = [c['vol'] for c in candles[:-1]]
+    avg_vol = sum(vols[-20:]) / max(len(vols[-20:]), 1)
+    cur_vol = candles[-1]['vol']
+    return (cur_vol / avg_vol) if avg_vol > 0 else 0.0
+
+def bot_x_htf_ok(symbol, htf="60m"):
+    """Higher-timeframe momentum confirmation for experimental bot."""
+    candles = fetch_klines(symbol, interval=htf, limit=45)
+    if not candles:
+        return False
+    e3, e2, e1 = calculate_ewo(candles)
+    if e1 is None or e2 is None:
+        return False
+    return (e1 >= e2) or (e1 > 0)
+
+def bot_x_entry_ok(candles, rsi_th=42.0, vol_th=1.5):
+    """EWO rebound + (volume spike OR RSI pullback)."""
+    e3, e2, e1 = calculate_ewo(candles)
+    if e1 is None or e2 is None or e3 is None:
+        return False
+    sig_rebound = (e1 < 0 and e1 > e2 and e2 <= e3)
+    if not sig_rebound:
+        return False
+    rsi_val = calculate_rsi(candles, 14)
+    vol_mult = candle_vol_mult(candles)
+    green = candles[-1]['close'] >= candles[-1]['open']
+    sig_vol = (vol_mult >= vol_th) and green
+    sig_rsi = rsi_val <= rsi_th
+    return sig_vol or sig_rsi
+
+def ewo_rebound_signal(candles):
+    e3, e2, e1 = calculate_ewo(candles)
+    if e1 is None or e2 is None or e3 is None:
+        return False, (None, None, None)
+    return (e1 < 0 and e1 > e2 and e2 <= e3), (e3, e2, e1)
+
+def mtf_tf_supportive(candles):
+    """Higher-TF trend support: rising EWO or already positive."""
+    e3, e2, e1 = calculate_ewo(candles)
+    if e1 is None or e2 is None:
+        return False
+    return (e1 >= e2) or (e1 > 0)
+
+def mtf_hierarchy_ok(symbol, entry_tf, mtf_settings):
+    """
+    MTFH confirm: entry TF checks only its configured hierarchy_parent
+    (off, or one strictly higher TF such as 15m/30m/60m/4h/1d).
+    """
+    tf_cfg = mtf_settings.get(entry_tf) or {}
+    parent = database.normalize_hierarchy_parent(entry_tf, tf_cfg.get("hierarchy_parent", "off"))
+    if parent == "off":
+        return True
+    candles = fetch_klines(symbol, interval=parent, limit=45)
+    if not candles:
+        return False
+    return mtf_tf_supportive(candles)
+
+def get_mtf_settings(cfg_or_bot=None):
+    if isinstance(cfg_or_bot, dict) and cfg_or_bot.get("mtf_settings"):
+        raw = cfg_or_bot.get("mtf_settings")
+        if isinstance(raw, dict):
+            return database.parse_mtf_settings(raw)
+        return database.parse_mtf_settings(raw)
+    return database.parse_mtf_settings(database.DEFAULT_MTF_SETTINGS)
+
+def position_notional(pos):
+    meta = pos.get("meta") or {}
+    if meta.get("trade_size_usdt"):
+        return float(meta.get("trade_size_usdt"))
+    return float(pos.get("entry_price", 0)) * float(pos.get("qty", 0))
+
+# Spot fee model: maker/chase ~0%, market/taker ~0.1% per side (estimate).
+MARKET_FEE_RATE = 0.001
+MAKER_FEE_RATE = 0.0
+
+def tag_order_fee_mode(res, fee_mode):
+    if isinstance(res, dict):
+        out = dict(res)
+        out["_fee_mode"] = fee_mode
+        return out
+    return res
+
+def resolve_fee_rate(exec_type=None, order_res=None):
+    """Prefer tagged/actual order mode; else bot exec_type; else market."""
+    if isinstance(order_res, dict):
+        mode = str(order_res.get("_fee_mode") or "").upper()
+        if mode in ("MARKET", "TAKER"):
+            return MARKET_FEE_RATE
+        if mode in ("CHASE_LIMIT", "LIMIT", "MAKER"):
+            return MAKER_FEE_RATE
+        ot = str(order_res.get("type") or "").upper()
+        if ot == "MARKET":
+            return MARKET_FEE_RATE
+        if ot == "LIMIT":
+            return MAKER_FEE_RATE
+    et = str(exec_type or "").upper()
+    if et == "CHASE_LIMIT":
+        return MAKER_FEE_RATE
+    return MARKET_FEE_RATE
+
+def resolve_fill(res, qty_hint=None, price_fallback=None):
+    """Average fill price and filled qty from exchange response."""
+    fallback_px = float(price_fallback) if price_fallback else None
+    hint_qty = float(qty_hint) if qty_hint else 0.0
+    if not isinstance(res, dict):
+        return fallback_px, hint_qty
+    quote = float(res.get("cummulativeQuoteQty") or 0.0)
+    filled = float(res.get("executedQty") or 0.0)
+    if filled <= 0 and hint_qty > 0:
+        filled = hint_qty
+    if quote > 0 and filled > 0:
+        return quote / filled, filled
+    return fallback_px, filled if filled > 0 else hint_qty
+
+def clean_price(price, decimals=8):
+    """Remove binary float noise while keeping exchange-relevant precision."""
+    try:
+        return float(f"{float(price):.{int(decimals)}f}")
+    except (TypeError, ValueError):
+        return price
+
+def clean_qty(qty, decimals=8):
+    try:
+        return float(f"{float(qty):.{int(decimals)}f}")
+    except (TypeError, ValueError):
+        return qty
+
+def fmt_usd(price, decimals=8):
+    """Human price string without scientific notation."""
+    try:
+        p = float(price)
+        d = int(decimals)
+        if abs(p) > 0 and abs(p) < 1e-4:
+            d = max(d, 10)
+        s = f"{p:.{d}f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+    except (TypeError, ValueError):
+        return str(price)
+
+def fmt_qty(qty, decimals=8):
+    try:
+        q = float(qty)
+        s = f"{q:.{int(decimals)}f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+    except (TypeError, ValueError):
+        return str(qty)
+
+def actual_exec_label(exec_type, order_res=None):
+    """Show real fill mode (Market fallback vs Chase) in logs."""
+    mode = None
+    if isinstance(order_res, dict):
+        mode = str(order_res.get("_fee_mode") or "").upper()
+        if not mode:
+            mode = str(order_res.get("type") or "").upper()
+    if mode in ("MARKET", "TAKER"):
+        return "MARKET"
+    if mode in ("CHASE_LIMIT", "LIMIT", "MAKER"):
+        return "CHASE_LIMIT" if str(exec_type or "").upper() == "CHASE_LIMIT" else "LIMIT"
+    return str(exec_type or "MARKET")
+
+def build_entry_from_fill(res, price_fallback, qty_hint, exec_type):
+    avg, filled = resolve_fill(res, qty_hint=qty_hint, price_fallback=price_fallback)
+    entry = clean_price(avg if avg is not None else price_fallback)
+    qty = clean_qty(filled if filled and filled > 0 else qty_hint)
+    return entry, qty, resolve_fee_rate(exec_type, res)
+
+def position_entry_fee_rate(pos, fallback_exec_type=None):
+    if pos.get("entry_fee_rate") is not None:
+        try:
+            return float(pos.get("entry_fee_rate"))
+        except (TypeError, ValueError):
+            pass
+    meta = pos.get("meta") or {}
+    if meta.get("entry_fee_rate") is not None:
+        try:
+            return float(meta.get("entry_fee_rate"))
+        except (TypeError, ValueError):
+            pass
+    return resolve_fee_rate(fallback_exec_type)
+
+def calc_round_trip_pnl(entry, exit_px, qty, entry_fee_rate, exit_fee_rate):
+    entry = float(entry)
+    exit_px = float(exit_px)
+    qty = float(qty)
+    gross = (exit_px - entry) * qty
+    fee = (entry * qty * float(entry_fee_rate)) + (exit_px * qty * float(exit_fee_rate))
+    return gross, fee, gross - fee
+
+def settle_exit_pnl(entry, qty, order_res, bid_fallback, entry_fee_rate, exec_type=None):
+    exit_px, filled = resolve_fill(order_res, qty_hint=qty, price_fallback=bid_fallback or entry)
+    if exit_px is None:
+        exit_px = float(bid_fallback or entry)
+    exit_px = clean_price(exit_px)
+    sell_qty = clean_qty(filled if filled and filled > 0 else qty)
+    exit_fee = resolve_fee_rate(exec_type, order_res)
+    gross, fee, net = calc_round_trip_pnl(entry, exit_px, sell_qty, entry_fee_rate, exit_fee)
+    return exit_px, sell_qty, gross, fee, net
+
 def evaluate_coin_signals(ticker, source="FUTURES", tf="5m", vol_th=2.0, rsi_th=38.0):
     raw_sym = ticker["symbol"]
     spot_sym = raw_sym.replace("_", "")
@@ -345,6 +814,60 @@ def get_asset_free_balance(asset_name):
             return float(a.get("free", 0.0))
     return 0.0
 
+def refresh_asset_balance_from_exchange(asset_name):
+    """Pull fresh free/locked for one asset into shared_state; return free qty."""
+    asset_name = str(asset_name or "").strip()
+    if not asset_name:
+        return 0.0
+    ok, acc = mexc_private_request("/api/v3/account")
+    if not ok or not isinstance(acc, dict) or "balances" not in acc:
+        return get_asset_free_balance(asset_name)
+
+    free = 0.0
+    locked = 0.0
+    for b in acc.get("balances", []):
+        if b.get("asset") == asset_name:
+            free = float(b.get("free", 0.0) or 0.0)
+            locked = float(b.get("locked", 0.0) or 0.0)
+            break
+
+    assets = list(shared_state.get("wallet_assets", []))
+    found = False
+    for i, a in enumerate(assets):
+        if a.get("asset") == asset_name:
+            usd_price = float(a.get("usd_price", 0.0) or 0.0)
+            if asset_name == "USDT":
+                usd_price = 1.0
+            elif usd_price <= 0:
+                usd_price = shared_state.get("market_prices", {}).get(f"{asset_name}USDT", {}).get("bid", 0.0) or 0.0
+            total = free + locked
+            bot_alloc = get_total_bot_allocated_qty(asset_name)
+            assets[i] = {
+                **a,
+                "free": free,
+                "locked": locked,
+                "total": total,
+                "bot_alloc": bot_alloc,
+                "unlinked_free": max(0.0, free - bot_alloc),
+                "usd_price": usd_price,
+                "usd_value": total * usd_price,
+            }
+            found = True
+            break
+    if not found and (free + locked) > 0:
+        usd_price = 1.0 if asset_name == "USDT" else shared_state.get("market_prices", {}).get(f"{asset_name}USDT", {}).get("bid", 0.0) or 0.0
+        total = free + locked
+        bot_alloc = get_total_bot_allocated_qty(asset_name)
+        assets.append({
+            "asset": asset_name, "free": free, "locked": locked, "total": total,
+            "bot_alloc": bot_alloc, "unlinked_free": max(0.0, free - bot_alloc),
+            "usd_price": usd_price, "usd_value": total * usd_price
+        })
+    shared_state["wallet_assets"] = assets
+    if asset_name == "USDT":
+        shared_state["real_balance_usdt"] = free
+    return free
+
 def get_total_bot_allocated_qty(asset_name):
     sym = f"{asset_name}USDT"
     tot = 0.0
@@ -356,6 +879,25 @@ def get_total_bot_allocated_qty(asset_name):
         if sp.get("symbol") == sym:
             tot += float(sp.get("qty", 0.0))
     return tot
+
+def _qty_step_ok(symbol, qty):
+    try:
+        return float(format_quantity(symbol, float(qty) or 0.0)) > 0
+    except Exception:
+        return False
+
+def _merge_fill_result(session_filled, session_quote, extra=None, fee_mode="CHASE_LIMIT"):
+    filled = float(session_filled or 0.0)
+    quote = float(session_quote or 0.0)
+    if isinstance(extra, dict):
+        filled += float(extra.get("executedQty") or 0.0)
+        quote += float(extra.get("cummulativeQuoteQty") or 0.0)
+    return tag_order_fee_mode({
+        "status": "FILLED",
+        "executedQty": filled,
+        "cummulativeQuoteQty": quote,
+        "type": "MARKET" if str(fee_mode).upper() == "MARKET" else "LIMIT",
+    }, fee_mode)
 
 def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", price=None):
     params = {"symbol": symbol, "side": side.upper(), "type": order_type.upper()}
@@ -372,52 +914,245 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
         else:
             return False, "تحديد الكمية مطلوب"
     
-    price_info = f" بسعر {price}$" if price else (f" بقيمة {quote_qty}$" if quote_qty else f" بكمية {qty}")
+    price_info = f" بسعر {fmt_usd(price)}$" if price else (f" بقيمة {fmt_usd(quote_qty)}$" if quote_qty else f" بكمية {fmt_qty(qty)}")
     add_log(f"📤 طلب {side.upper()} {symbol} ({order_type}){price_info}", "orders", "info")
     ok, res = mexc_private_request("/api/v3/order", method="POST", params=params)
     if not ok:
+        err_s = str(res)
+        if "10007" in err_s or "not support api" in err_s.lower():
+            UNSUPPORTED_API_SYMBOLS.add(symbol)
+            if symbol in SYMBOL_RULES:
+                SYMBOL_RULES[symbol]["supported"] = False
         add_log(f"❌ خطأ {symbol}: {res}", "orders", "danger")
-    return ok, res
+        return ok, res
+    fee_mode = "MARKET" if order_type.upper() == "MARKET" else "LIMIT"
+    return True, tag_order_fee_mode(res, fee_mode)
 
 def execute_smart_chase_order(symbol, side, qty=None, quote_qty=None):
+    """Chase best bid/ask with partial-fill awareness; market only the remainder."""
     g_settings = database.get_global_settings()
     max_chase_secs = int(g_settings.get("chase_timeout", 12))
     interval_secs = float(g_settings.get("chase_interval", 2.0))
+    side_u = side.upper()
+    target_qty = float(qty) if qty else None
+    target_quote = float(quote_qty) if quote_qty else None
+
+    session_filled = 0.0
+    session_quote = 0.0
+    order_id = None
+    used_market = False
+
+    def harvest_current(cancel=True):
+        nonlocal session_filled, session_quote, order_id
+        if not order_id:
+            return None
+        ok_chk, ord_info = mexc_private_request("/api/v3/order", params={"symbol": symbol, "orderId": order_id})
+        info = ord_info if ok_chk and isinstance(ord_info, dict) else None
+        if info:
+            session_filled += float(info.get("executedQty") or 0.0)
+            session_quote += float(info.get("cummulativeQuoteQty") or 0.0)
+            st = str(info.get("status") or "").upper()
+            if cancel and st not in ("FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
+                mexc_private_request("/api/v3/order", method="DELETE", params={"symbol": symbol, "orderId": order_id})
+        elif cancel:
+            mexc_private_request("/api/v3/order", method="DELETE", params={"symbol": symbol, "orderId": order_id})
+        order_id = None
+        return info
+
+    def rem_qty():
+        if target_qty is None:
+            return None
+        return max(0.0, target_qty - session_filled)
+
+    def rem_quote():
+        if target_quote is None:
+            return None
+        return max(0.0, target_quote - session_quote)
+
+    def remainder_exhausted():
+        rq = rem_qty()
+        rquote = rem_quote()
+        if rq is not None:
+            return not _qty_step_ok(symbol, rq)
+        if rquote is not None:
+            return rquote < 0.05
+        return True
+
+    def success_result(fee_mode):
+        mode = "MARKET" if used_market or str(fee_mode).upper() == "MARKET" else "CHASE_LIMIT"
+        return True, _merge_fill_result(session_filled, session_quote, fee_mode=mode)
+
+    def market_remainder(reason="timeout"):
+        nonlocal used_market, session_filled, session_quote
+        harvest_current(cancel=True)
+        if remainder_exhausted():
+            if session_filled > 0 or session_quote > 0:
+                return success_result("CHASE_LIMIT")
+            push_ops_alert("chase_fallback", f"Chase→Market على {symbol} {side_u} ({reason})", cooldown_sec=60)
+            return False, "لا تبقى كمية للتنفيذ"
+
+        push_ops_alert(
+            "chase_fallback",
+            f"Chase→Market على {symbol} {side_u} ({reason}, متبقي)",
+            cooldown_sec=60
+        )
+
+        if side_u == "SELL":
+            rq = rem_qty()
+            base = symbol.replace("USDT", "")
+            avail = refresh_asset_balance_from_exchange(base)
+            if rq is None:
+                rq = avail
+            else:
+                rq = min(rq, avail)
+            if not _qty_step_ok(symbol, rq):
+                if session_filled > 0:
+                    return success_result("CHASE_LIMIT")
+                return False, "[30005] Oversold"
+            ok_m, res_m = place_order(symbol, side_u, qty=rq, order_type="MARKET")
+        else:
+            rquote = rem_quote()
+            if rquote is not None and rquote >= 0.05:
+                ok_m, res_m = place_order(symbol, side_u, quote_qty=rquote, order_type="MARKET")
+            else:
+                rq = rem_qty()
+                if rq is None or not _qty_step_ok(symbol, rq):
+                    if session_filled > 0 or session_quote > 0:
+                        return success_result("CHASE_LIMIT")
+                    return False, "لا تبقى كمية للتنفيذ"
+                ok_m, res_m = place_order(symbol, side_u, qty=rq, order_type="MARKET")
+
+        if ok_m and isinstance(res_m, dict):
+            used_market = True
+            session_filled += float(res_m.get("executedQty") or 0.0)
+            session_quote += float(res_m.get("cummulativeQuoteQty") or 0.0)
+            return success_result("MARKET")
+        if session_filled > 0 or session_quote > 0:
+            # Partial chase fill already done; surface market error but keep fills
+            used_market = True
+            return success_result("MARKET")
+        return ok_m, res_m
 
     bid, ask = get_orderbook(symbol)
     if not bid or not ask:
-        return place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
-    
-    order_price = bid if side.upper() == "BUY" else ask
-    order_qty = qty if qty else (quote_qty / order_price if quote_qty else 0)
-    
-    ok, res = place_order(symbol, side, qty=order_qty, price=order_price, order_type="LIMIT")
+        return market_remainder("no_orderbook")
+
+    order_price = bid if side_u == "BUY" else ask
+
+    def place_chase_limit(price):
+        nonlocal order_id
+        rq = rem_qty()
+        rquote = rem_quote()
+        if side_u == "BUY" and rquote is not None:
+            if rquote < 0.05:
+                return False, "quote_done"
+            order_qty = rquote / price if price else 0
+        else:
+            if rq is None:
+                order_qty = (rquote / price) if (rquote and price) else 0
+            else:
+                order_qty = rq
+        if not _qty_step_ok(symbol, order_qty):
+            return False, "qty_done"
+        ok, res = place_order(symbol, side_u, qty=order_qty, price=price, order_type="LIMIT")
+        if not ok:
+            return False, res
+        order_id = res.get("orderId")
+        return True, res
+
+    ok, res = place_chase_limit(order_price)
     if not ok:
-        return place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
-    
-    order_id = res.get("orderId")
+        if res in ("quote_done", "qty_done"):
+            return success_result("CHASE_LIMIT") if (session_filled > 0 or session_quote > 0) else market_remainder("limit_rejected")
+        return market_remainder("limit_rejected")
+
     start_t = time.time()
-    
     while time.time() - start_t < max_chase_secs:
         time.sleep(interval_secs)
-        cur_bid, cur_ask = get_orderbook(symbol)
-        best_price = cur_bid if side.upper() == "BUY" else cur_ask
-        
         ok_chk, ord_info = mexc_private_request("/api/v3/order", params={"symbol": symbol, "orderId": order_id})
-        if ok_chk and ord_info.get("status") == "FILLED":
-            return True, ord_info
-        
-        if best_price != order_price:
-            mexc_private_request("/api/v3/order", method="DELETE", params={"symbol": symbol, "orderId": order_id})
+        if ok_chk and isinstance(ord_info, dict) and str(ord_info.get("status") or "").upper() == "FILLED":
+            session_filled += float(ord_info.get("executedQty") or 0.0)
+            session_quote += float(ord_info.get("cummulativeQuoteQty") or 0.0)
+            order_id = None
+            return success_result("CHASE_LIMIT")
+
+        cur_bid, cur_ask = get_orderbook(symbol)
+        best_price = cur_bid if side_u == "BUY" else cur_ask
+        if best_price and best_price != order_price:
+            harvest_current(cancel=True)
+            if remainder_exhausted():
+                return success_result("CHASE_LIMIT")
             order_price = best_price
-            ok_re, res_re = place_order(symbol, side, qty=order_qty, price=order_price, order_type="LIMIT")
-            if ok_re:
-                order_id = res_re.get("orderId")
-            else:
+            ok_re, res_re = place_chase_limit(order_price)
+            if not ok_re:
+                if res_re in ("quote_done", "qty_done"):
+                    return success_result("CHASE_LIMIT")
                 break
 
-    mexc_private_request("/api/v3/order", method="DELETE", params={"symbol": symbol, "orderId": order_id})
-    return place_order(symbol, side, qty=qty, quote_qty=quote_qty, order_type="MARKET")
+    return market_remainder("timeout")
+
+def handle_oversold_exit(bKey, sym, pos, entry, exec_type, reason="🛑 SL"):
+    """
+    After Oversold: refresh wallet. If dust/gone → drop tracking.
+    If free qty remains → one market sell attempt then settle.
+    Returns True if position should be removed from active list.
+    """
+    base_asset = sym.replace("USDT", "")
+    free = refresh_asset_balance_from_exchange(base_asset)
+    sell_qty = 0.0
+    try:
+        sell_qty = float(format_quantity(sym, min(float(pos.get("qty", 0) or 0), free)))
+    except Exception:
+        sell_qty = 0.0
+
+    if sell_qty <= 0:
+        database.delete_active_trade(pos["id"])
+        add_log(
+            f"👻 [{bKey}] {sym} Oversold بدون رصيد قابل للبيع — حُذفت من التتبع (لا PnL إضافي)",
+            "sells", "warning"
+        )
+        return True
+
+    ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+    if ok:
+        entry_fee = position_entry_fee_rate(pos, exec_type)
+        bid = shared_state.get("market_prices", {}).get(sym, {}).get("bid", entry)
+        real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+            entry, sell_qty, res, bid, entry_fee, "MARKET"
+        )
+        bot_state = shared_state["bots"].get(bKey)
+        if bot_state is not None:
+            bot_state["daily_pnl"] = float(bot_state.get("daily_pnl", 0.0)) + net_pnl
+            coins = bot_state.setdefault("daily_pnl_coins", {})
+            coins[sym] = float(coins.get(sym, 0.0)) + net_pnl
+            bot_state["trades_count"] = int(bot_state.get("trades_count", 0)) + 1
+            if net_pnl > 0:
+                bot_state["winning_count"] = int(bot_state.get("winning_count", 0)) + 1
+        database.archive_closed_trade({
+            "id": pos["id"], "bot_name": bKey, "symbol": sym,
+            "entry_price": entry, "exit_price": real_exit,
+            "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+            "net_pnl": net_pnl, "reason": f"{reason} · recovery",
+            "entry_time": pos.get("time") or pos.get("time_str"), "exit_time": get_current_iso_time()
+        })
+        database.delete_active_trade(pos["id"])
+        add_log(
+            f"💰 [{bKey}] إغلاق {sym} بعد Oversold | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$",
+            "sells", "success" if net_pnl > 0 else "danger"
+        )
+        refresh_asset_balance_from_exchange(base_asset)
+        return True
+
+    database.delete_active_trade(pos["id"])
+    push_ops_alert("oversold", f"{bKey}: فشل إغلاق {sym} بعد Oversold — حُذفت من التتبع", cooldown_sec=120)
+    add_log(f"🚨 [{bKey}] بقي رصيد {sym} لكن البيع فشل بعد Oversold — حُذفت من التتبع", "sells", "danger")
+    return True
+
+def compute_sell_qty(sym, pos_qty):
+    """Fresh exchange free balance capped by position qty."""
+    base_asset = sym.replace("USDT", "")
+    avail = refresh_asset_balance_from_exchange(base_asset)
+    return min(float(pos_qty or 0.0), float(avail or 0.0))
 
 def refresh_wallet_and_prices():
     try:
@@ -470,6 +1205,7 @@ def refresh_wallet_and_prices():
             shared_state["total_wallet_usd_value"] = total_val_usd
         else:
             shared_state["api_connected"] = False
+            push_ops_alert("api", "فشل الاتصال بـ MEXC account / المفاتيح أو الشبكة", cooldown_sec=300)
 
         ok_ord, open_ords = mexc_private_request("/api/v3/openOrders")
         if ok_ord and isinstance(open_ords, list):
@@ -537,28 +1273,29 @@ def trading_engine_loop():
                 sl_price = entry * (1.0 - sp.get("sl_pct", 0.010))
 
                 if not sp.get("tp1_hit") and (highest >= tp1_price):
-                    half_qty = float(format_quantity(sym, sp["qty"] * 0.5))
+                    avail = refresh_asset_balance_from_exchange(base_asset)
+                    half_qty = float(format_quantity(sym, min(sp["qty"] * 0.5, avail)))
                     if half_qty > 0:
                         ok, res = place_order(sym, "SELL", qty=half_qty, order_type="MARKET")
                         if ok:
-                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                            real_exit = (usd_rec / half_qty) if (usd_rec > 0 and half_qty > 0) else bid
-                            gross_pnl = (real_exit - entry) * half_qty
-                            fee_usd = (entry * half_qty * 0.001) + (real_exit * half_qty * 0.001)
-                            net_pnl = gross_pnl - fee_usd
+                            entry_fee = position_entry_fee_rate(sp, "MARKET")
+                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                entry, half_qty, res, bid, entry_fee, "MARKET"
+                            )
 
                             database.archive_closed_trade({
                                 "id": f"{sp['id']}_tp1", "bot_name": prof_name, "symbol": sym,
                                 "entry_price": entry, "exit_price": real_exit,
-                                "qty": half_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                 "net_pnl": net_pnl, "reason": "🎯 TP1 (50% تأمين)",
                                 "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
                             })
 
                             sp["tp1_hit"] = 1
-                            sp["qty"] -= half_qty
+                            sp["qty"] -= sold_qty
                             database.update_sniper_trade(sp["id"], {"tp1_hit": 1, "qty": sp["qty"]})
-                            add_log(f"🎯 [{prof_name}] بيع 50% لـ {sym} عند {real_exit}$ | ربح: {net_pnl:+.3f}$ وتأمين الدخول", "sells", "success")
+                            add_log(f"🎯 [{prof_name}] بيع 50% لـ {sym} عند {fmt_usd(real_exit)}$ | ربح: {net_pnl:+.3f}$ وتأمين الدخول", "sells", "success")
+                            refresh_asset_balance_from_exchange(base_asset)
 
                 effective_sl = entry if sp.get("tp1_hit") else sl_price
                 cb_pct = sp.get("trailing_cb", 0.006)
@@ -571,37 +1308,37 @@ def trading_engine_loop():
 
                 if hit_tp2 or hit_sl:
                     reason = "🎯 TP2 النهائي" if hit_tp2 else ("🔄 TS القناص" if effective_sl > sl_price else "🛑 SL القناص")
-                    avail = get_asset_free_balance(base_asset)
-                    sell_qty = min(sp["qty"], avail)
+                    sell_qty = compute_sell_qty(sym, sp["qty"])
 
                     if float(format_quantity(sym, sell_qty)) > 0:
                         ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
                         if ok:
-                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                            real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
-                            gross_pnl = (real_exit - entry) * sell_qty
-                            fee_usd = (entry * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
-                            net_pnl = gross_pnl - fee_usd
+                            entry_fee = position_entry_fee_rate(sp, "MARKET")
+                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                entry, sell_qty, res, bid, entry_fee, "MARKET"
+                            )
 
                             database.archive_closed_trade({
                                 "id": sp["id"], "bot_name": prof_name, "symbol": sym,
                                 "entry_price": entry, "exit_price": real_exit,
-                                "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                 "net_pnl": net_pnl, "reason": reason,
                                 "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
                             })
                             database.delete_sniper_trade(sp["id"])
-                            add_log(f"💰 [{prof_name}] إغلاق نهائي لـ {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                            add_log(f"💰 [{prof_name}] إغلاق نهائي لـ {sym} | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                            refresh_asset_balance_from_exchange(base_asset)
                         else:
                             still_snipers.append(sp)
                     else:
                         database.delete_sniper_trade(sp["id"])
+                        add_log(f"👻 [{prof_name}] {sym} بدون رصيد — حُذفت من تتبع القناص", "sells", "warning")
                 else:
                     still_snipers.append(sp)
 
             shared_state["sniper_positions"] = still_snipers
 
-            # متابعة صفقات البوتات الخمسة
+            # متابعة صفقات البوتات
             configs = {k: database.get_bot_config(k) for k in BOT_KEYS}
             for bKey, cfg in configs.items():
                 syms = parse_symbols_list(cfg.get("symbols", ""))
@@ -613,7 +1350,29 @@ def trading_engine_loop():
                 shared_state["bots"][bKey]["tp_pct"] = float(cfg.get("tp_pct", 0.025)) * 100.0
                 shared_state["bots"][bKey]["sl_pct"] = float(cfg.get("sl_pct", 0.012)) * 100.0
                 shared_state["bots"][bKey]["timeframe"] = cfg.get("timeframe", "15m")
-                shared_state["bots"][bKey]["trailing_stop"] = int(cfg.get("trailing_stop", 0))
+                shared_state["bots"][bKey]["trailing_stop"] = int(cfg.get("trailing_stop", 1 if bKey in EXPERIMENTAL_BOTS or bKey in MTF_BOTS else 0))
+                shared_state["bots"][bKey]["trailing_cb"] = float(cfg.get("trailing_cb", 0.006))
+                shared_state["bots"][bKey]["symbols"] = syms
+                shared_state["bots"][bKey]["daily_target"] = float(cfg.get("daily_profit_target", 5.0))
+                shared_state["bots"][bKey]["daily_loss_limit"] = abs(float(cfg.get("daily_loss_limit", 5.0)))
+                if bKey in MTF_BOTS:
+                    shared_state["bots"][bKey]["mtf_settings"] = get_mtf_settings(cfg)
+                    shared_state["bots"][bKey]["max_allocation"] = float(cfg.get("max_allocation_usdt", 300.0))
+
+                allowed, lock_reason = bot_entries_allowed(shared_state["bots"][bKey])
+                if not allowed and cfg.get("status") == "RUNNING":
+                    if lock_reason == "loss_limit":
+                        push_ops_alert(
+                            "daily_loss",
+                            f"{bKey}: توقف الدخول — خسارة اليوم بلغت الحد {shared_state['bots'][bKey]['daily_loss_limit']}$",
+                            cooldown_sec=900
+                        )
+                    elif lock_reason == "profit_target":
+                        push_ops_alert(
+                            "daily_profit",
+                            f"{bKey}: توقف الدخول — تحقق هدف الربح اليومي {shared_state['bots'][bKey]['daily_target']}$",
+                            cooldown_sec=900
+                        )
 
                 for s in syms:
                     if s not in shared_state["bots"][bKey]["active_positions"]:
@@ -641,7 +1400,7 @@ def trading_engine_loop():
                     ask = p_info["ask"]
                     base_asset = sym.replace("USDT", "").replace("USDC", "")
 
-                    if bKey in ["BOT_1", "BOT_2A", "BOT_2B", "BOT_2C"]:
+                    if bKey in CLASSIC_BOTS:
                         tf = "5m" if bKey == "BOT_1" else cfg.get("timeframe", "15m")
                         candles = fetch_klines(sym, interval=tf, limit=45)
                         
@@ -666,11 +1425,10 @@ def trading_engine_loop():
                                     
                                     if hit_tp or hit_sl or hit_rev:
                                         reason = "🎯 TP" if hit_tp else ("🛑 SL" if hit_sl else "🔄 EWO")
-                                        avail = get_asset_free_balance(base_asset)
-                                        sell_qty = min(pos['qty'], avail)
+                                        sell_qty = compute_sell_qty(sym, pos['qty'])
 
                                         if float(format_quantity(sym, sell_qty)) <= 0:
-                                            database.delete_active_trade(pos['id'])
+                                            handle_oversold_exit(bKey, sym, pos, pos['entry_price'], exec_type, reason)
                                             continue
 
                                         if exec_type == "CHASE_LIMIT":
@@ -679,12 +1437,10 @@ def trading_engine_loop():
                                             ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
 
                                         if ok:
-                                            usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                                            real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
-                                            gross_pnl = (real_exit - pos['entry_price']) * sell_qty
-                                            fee_rate = 0.0 if exec_type == "CHASE_LIMIT" else 0.001
-                                            fee_usd = (pos['entry_price'] * sell_qty * fee_rate) + (real_exit * sell_qty * fee_rate)
-                                            net_pnl = gross_pnl - fee_usd
+                                            entry_fee = position_entry_fee_rate(pos, exec_type)
+                                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                                pos['entry_price'], sell_qty, res, bid, entry_fee, exec_type
+                                            )
                                             
                                             shared_state["bots"][bKey]["daily_pnl"] += net_pnl
                                             shared_state["bots"][bKey]["daily_pnl_coins"][sym] += net_pnl
@@ -694,14 +1450,16 @@ def trading_engine_loop():
                                             database.archive_closed_trade({
                                                 "id": pos["id"], "bot_name": bKey, "symbol": sym,
                                                 "entry_price": pos["entry_price"], "exit_price": real_exit,
-                                                "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                                 "net_pnl": net_pnl, "reason": reason,
                                                 "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                             })
-                                            add_log(f"💰 [{bKey}] بيع {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                            database.delete_active_trade(pos["id"])
+                                            add_log(f"💰 [{bKey}] بيع {sym} | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                            refresh_asset_balance_from_exchange(base_asset)
                                         else:
                                             if "30005" in str(res) or "Oversold" in str(res):
-                                                database.delete_active_trade(pos['id'])
+                                                handle_oversold_exit(bKey, sym, pos, pos['entry_price'], exec_type, reason)
                                             else:
                                                 still_pos.append(pos)
                                     else:
@@ -714,9 +1472,9 @@ def trading_engine_loop():
                                 is_candle_locked = (LAST_ENTRY_CANDLE.get(lock_key) == latest_candle_time)
                                 can_open_coin = len(still_pos) < max_con
                                 can_open_alloc = (current_used_cap + size) <= max_alloc
-                                port_not_locked = shared_state["bots"][bKey]["daily_pnl"] < shared_state["bots"][bKey]["daily_target"]
+                                entries_ok, _lock = bot_entries_allowed(shared_state["bots"][bKey])
 
-                                if cfg.get("status") == "RUNNING" and sig_rebound and not is_candle_locked and can_open_coin and can_open_alloc and port_not_locked:
+                                if cfg.get("status") == "RUNNING" and sig_rebound and not is_candle_locked and can_open_coin and can_open_alloc and entries_ok:
                                     if shared_state["real_balance_usdt"] >= size:
                                         q = float(format_quantity(sym, size / ask))
                                         if q > 0:
@@ -729,28 +1487,40 @@ def trading_engine_loop():
                                                 LAST_ENTRY_CANDLE[lock_key] = latest_candle_time
                                                 trade_id = f"{bKey.lower()}_{int(time.time()*1000)}"
                                                 time_str = get_current_iso_time()
+                                                fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
                                                 t_obj = {
                                                     'id': trade_id, 'bot_name': bKey, 'symbol': sym,
-                                                    'entry_price': ask, 'highest_price': ask, 'qty': q,
+                                                    'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
                                                     'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct,
-                                                    'time_str': time_str
+                                                    'time_str': time_str,
+                                                    'meta': {'entry_fee_rate': entry_fee}
                                                 }
                                                 database.insert_active_trade(t_obj)
                                                 shared_state["bots"][bKey]["active_positions"][sym].append({
-                                                    'id': trade_id, 'entry_price': ask, 'highest_price': ask, 'qty': q,
-                                                    'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct, 'time': time_str
+                                                    'id': trade_id, 'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
+                                                    'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct, 'time': time_str,
+                                                    'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                                                 })
                                                 current_used_cap += size
-                                                add_log(f"🚀 [{bKey}] شراء {sym} عند {ask}$ ({exec_type})", "buys", "primary")
+                                                add_log(f"🚀 [{bKey}] شراء {sym} عند {fmt_usd(fill_entry)}$ ({actual_exec_label(exec_type, res)})", "buys", "primary")
+                                    else:
+                                        push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym} (مطلوب {size}$)", cooldown_sec=300)
 
-                    elif bKey == "BOT_3":
+                    elif bKey in EXPERIMENTAL_BOTS:
+                        tf = cfg.get("timeframe", "15m")
+                        candles = fetch_klines(sym, interval=tf, limit=45)
+                        if not candles:
+                            continue
+
+                        latest_candle_time = candles[-1]['time']
                         default_tp_pct = float(cfg.get("tp_pct", 0.025))
-                        default_sl_pct = float(cfg.get("sl_pct", 0.012))
-                        use_ts = bool(cfg.get("trailing_stop", 1))
-                        cb_pct = float(cfg.get("trailing_cb", 0.005))
+                        default_sl_pct = float(cfg.get("sl_pct", 0.010))
+                        use_ts = bool(int(cfg.get("trailing_stop", 1)))
+                        cb_pct = float(cfg.get("trailing_cb", 0.006))
+                        still_x = []
+                        bot_state = shared_state["bots"][bKey]
 
-                        still_b3 = []
-                        for pos in shared_state["bots"]["BOT_3"]["active_positions"].get(sym, []):
+                        for pos in bot_state["active_positions"].get(sym, []):
                             entry = pos['entry_price']
                             highest = pos.get('highest_price', entry)
                             if bid > highest:
@@ -760,53 +1530,329 @@ def trading_engine_loop():
 
                             pos_tp_pct = pos.get("tp_pct", default_tp_pct)
                             pos_sl_pct = pos.get("sl_pct", default_sl_pct)
-
                             tp_price = entry * (1.0 + pos_tp_pct)
                             sl_price = entry * (1.0 - pos_sl_pct)
-                            trailing_sl = highest * (1.0 - cb_pct) if use_ts else sl_price
-                            effective_sl = max(sl_price, trailing_sl) if use_ts and highest >= (entry * (1.0 + cb_pct)) else sl_price
+                            trail_armed = use_ts and highest >= (entry * (1.0 + max(cb_pct, 0.008)))
+                            trailing_sl = highest * (1.0 - cb_pct) if trail_armed else sl_price
+                            effective_sl = max(sl_price, trailing_sl) if trail_armed else sl_price
 
+                            e3, e2, e1 = calculate_ewo(candles)
                             hit_tp = bid >= tp_price
                             hit_sl = bid <= effective_sl
+                            hit_rev = (
+                                e1 is not None and e2 is not None and
+                                (e2 > 0) and (e1 < e2) and
+                                (bid >= entry * 1.008)
+                            )
 
-                            if hit_tp or hit_sl:
-                                reason = "🎯 TP" if hit_tp else ("🔄 TS" if use_ts and effective_sl > sl_price else "🛑 SL")
-                                avail = get_asset_free_balance(base_asset)
-                                sell_qty = min(pos['qty'], avail)
-
+                            if hit_tp or hit_sl or hit_rev:
+                                reason = "🎯 TP" if hit_tp else ("🔄 TS" if trail_armed and hit_sl and effective_sl > sl_price else ("🔄 EWO+" if hit_rev else "🛑 SL"))
+                                sell_qty = compute_sell_qty(sym, pos['qty'])
                                 if float(format_quantity(sym, sell_qty)) <= 0:
-                                    database.delete_active_trade(pos['id'])
+                                    handle_oversold_exit(bKey, sym, pos, entry, exec_type, reason)
                                     continue
 
-                                ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
-                                if ok:
-                                    usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                                    real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else bid
-                                    gross_pnl = (real_exit - entry) * sell_qty
-                                    fee_usd = (entry * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
-                                    net_pnl = gross_pnl - fee_usd
+                                if exec_type == "CHASE_LIMIT":
+                                    ok, res = execute_smart_chase_order(sym, "SELL", qty=sell_qty)
+                                else:
+                                    ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
 
-                                    shared_state["bots"]["BOT_3"]["daily_pnl"] += net_pnl
-                                    shared_state["bots"]["BOT_3"]["daily_pnl_coins"][sym] += net_pnl
-                                    shared_state["bots"]["BOT_3"]["trades_count"] += 1
-                                    if net_pnl > 0: shared_state["bots"]["BOT_3"]["winning_count"] += 1
-                                    
+                                if ok:
+                                    entry_fee = position_entry_fee_rate(pos, exec_type)
+                                    real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                        entry, sell_qty, res, bid, entry_fee, exec_type
+                                    )
+
+                                    bot_state["daily_pnl"] += net_pnl
+                                    bot_state["daily_pnl_coins"][sym] = bot_state["daily_pnl_coins"].get(sym, 0.0) + net_pnl
+                                    bot_state["trades_count"] += 1
+                                    if net_pnl > 0:
+                                        bot_state["winning_count"] += 1
+
                                     database.archive_closed_trade({
-                                        "id": pos["id"], "bot_name": "BOT_3", "symbol": sym,
+                                        "id": pos["id"], "bot_name": bKey, "symbol": sym,
                                         "entry_price": entry, "exit_price": real_exit,
-                                        "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                        "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
                                         "net_pnl": net_pnl, "reason": reason,
                                         "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
-                                    add_log(f"💰 [Bot 3] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    database.delete_active_trade(pos["id"])
+                                    add_log(f"💰 [{bKey}] إغلاق {sym} | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    refresh_asset_balance_from_exchange(base_asset)
                                 else:
                                     if "30005" in str(res) or "Oversold" in str(res):
-                                        database.delete_active_trade(pos['id'])
+                                        handle_oversold_exit(bKey, sym, pos, entry, exec_type, reason)
                                     else:
-                                        still_b3.append(pos)
+                                        still_x.append(pos)
                             else:
-                                still_b3.append(pos)
-                        shared_state["bots"]["BOT_3"]["active_positions"][sym] = still_b3
+                                still_x.append(pos)
+
+                        bot_state["active_positions"][sym] = still_x
+
+                        lock_key = f"{bKey}_{sym}"
+                        is_candle_locked = (LAST_ENTRY_CANDLE.get(lock_key) == latest_candle_time)
+                        can_open_coin = len(still_x) < max_con
+                        can_open_alloc = (current_used_cap + size) <= max_alloc
+                        entries_ok, _lock = bot_entries_allowed(bot_state)
+                        entry_ready = bot_x_entry_ok(candles) and bot_x_htf_ok(sym, "60m")
+
+                        if cfg.get("status") == "RUNNING" and entry_ready and not is_candle_locked and can_open_coin and can_open_alloc and entries_ok:
+                            if shared_state["real_balance_usdt"] >= size:
+                                q = float(format_quantity(sym, size / ask))
+                                if q > 0:
+                                    if exec_type == "CHASE_LIMIT":
+                                        ok, res = execute_smart_chase_order(sym, "BUY", quote_qty=size)
+                                    else:
+                                        ok, res = place_order(sym, "BUY", qty=q, quote_qty=size, order_type="MARKET")
+                                    if ok:
+                                        LAST_ENTRY_CANDLE[lock_key] = latest_candle_time
+                                        trade_id = f"{bKey.lower()}_{int(time.time()*1000)}"
+                                        time_str = get_current_iso_time()
+                                        fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
+                                        t_obj = {
+                                            'id': trade_id, 'bot_name': bKey, 'symbol': sym,
+                                            'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
+                                            'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct,
+                                            'time_str': time_str,
+                                            'meta': {'entry_fee_rate': entry_fee}
+                                        }
+                                        database.insert_active_trade(t_obj)
+                                        bot_state["active_positions"][sym].append({
+                                            'id': trade_id, 'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
+                                            'tp_pct': default_tp_pct, 'sl_pct': default_sl_pct, 'time': time_str,
+                                            'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
+                                        })
+                                        current_used_cap += size
+                                        add_log(f"🧪 [{bKey}] شراء {sym} عند {fmt_usd(fill_entry)}$ ({actual_exec_label(exec_type, res)}) | EWO+HTF+Confirm", "buys", "primary")
+                            else:
+                                push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym} (مطلوب {size}$)", cooldown_sec=300)
+
+                    elif bKey in MTF_BOTS:
+                        bot_state = shared_state["bots"][bKey]
+                        hierarchical = (bKey == MTFH_BOT)
+                        mtf = get_mtf_settings(cfg if cfg.get("mtf_settings") else bot_state)
+                        gcfg = mtf.get("_global", {})
+                        max_open = int(gcfg.get("max_open_positions", 4))
+                        be_offset = float(gcfg.get("be_offset", 0.001))
+                        ewo_exit_min = float(gcfg.get("ewo_exit_min_profit", 0.008))
+                        max_con = int(cfg.get("max_concurrent_per_coin", 2))
+                        max_alloc = float(cfg.get("max_allocation_usdt", 300.0))
+                        exec_type = cfg.get("order_exec_type", "CHASE_LIMIT")
+
+                        all_pos = []
+                        for s2, plist in bot_state["active_positions"].items():
+                            for p in plist:
+                                all_pos.append((s2, p))
+                        open_count = len(all_pos)
+                        used_cap = sum(position_notional(p) for _, p in all_pos)
+
+                        # Manage open positions for this symbol across TFs
+                        still_sym = []
+                        for pos in bot_state["active_positions"].get(sym, []):
+                            tf = pos.get("timeframe") or (pos.get("meta") or {}).get("timeframe") or "15m"
+                            meta = dict(pos.get("meta") or {})
+                            entry = float(pos["entry_price"])
+                            highest = float(pos.get("highest_price", entry))
+                            if bid > highest:
+                                highest = bid
+                                pos["highest_price"] = highest
+                                meta["highest_price"] = highest
+                                database.update_active_trade(pos["id"], {"highest_price": highest, "meta_json": json.dumps(meta, ensure_ascii=False)})
+
+                            tp_pct = float(pos.get("tp_pct", meta.get("tp_pct", 0.022)))
+                            sl_pct = float(pos.get("sl_pct", meta.get("sl_pct", 0.010)))
+                            be_enabled = bool(meta.get("be_enabled", False))
+                            trail_enabled = bool(meta.get("trail_enabled", False))
+                            be_trigger = float(meta.get("be_trigger_pct", 0.012))
+                            trail_trigger = float(meta.get("trail_trigger_pct", 0.018))
+                            trail_cb = float(meta.get("trail_cb_pct", 0.006))
+                            be_armed = bool(pos.get("be_armed", meta.get("be_armed", False)))
+                            trail_armed = bool(pos.get("trail_armed", meta.get("trail_armed", False)))
+
+                            sl0 = entry * (1.0 - sl_pct)
+                            tp_price = entry * (1.0 + tp_pct)
+                            sl_eff = sl0
+
+                            if be_enabled and highest >= entry * (1.0 + be_trigger):
+                                be_armed = True
+                            if trail_enabled and highest >= entry * (1.0 + trail_trigger):
+                                trail_armed = True
+
+                            if be_armed:
+                                sl_eff = max(sl_eff, entry * (1.0 + be_offset))
+                            if trail_armed:
+                                sl_eff = max(sl_eff, highest * (1.0 - trail_cb))
+
+                            if be_armed != bool(meta.get("be_armed", False)) or trail_armed != bool(meta.get("trail_armed", False)):
+                                meta["be_armed"] = be_armed
+                                meta["trail_armed"] = trail_armed
+                                pos["be_armed"] = be_armed
+                                pos["trail_armed"] = trail_armed
+                                pos["meta"] = meta
+                                database.update_active_trade(pos["id"], {"meta_json": json.dumps(meta, ensure_ascii=False)})
+
+                            candles_tf = fetch_klines(sym, interval=tf, limit=45)
+                            e3, e2, e1 = calculate_ewo(candles_tf) if candles_tf else (None, None, None)
+                            hit_tp = bid >= tp_price
+                            hit_sl = bid <= sl_eff
+                            hit_ewo = (
+                                e1 is not None and e2 is not None and
+                                (e2 > 0) and (e1 < e2) and
+                                (bid >= entry * (1.0 + ewo_exit_min))
+                            )
+
+                            if hit_tp or hit_sl or hit_ewo:
+                                if hit_tp:
+                                    reason = "🎯 TP"
+                                elif hit_ewo:
+                                    reason = "🔄 EWO+"
+                                elif trail_armed and hit_sl:
+                                    reason = "🔄 TS"
+                                elif be_armed and hit_sl:
+                                    reason = "🛡️ BE"
+                                else:
+                                    reason = "🛑 SL"
+
+                                sell_qty = compute_sell_qty(sym, pos["qty"])
+                                if float(format_quantity(sym, sell_qty)) <= 0:
+                                    handle_oversold_exit(bKey, sym, pos, entry, exec_type, reason)
+                                    continue
+
+                                if exec_type == "CHASE_LIMIT":
+                                    ok, res = execute_smart_chase_order(sym, "SELL", qty=sell_qty)
+                                else:
+                                    ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+
+                                if ok:
+                                    entry_fee = position_entry_fee_rate(pos, exec_type)
+                                    real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                        entry, sell_qty, res, bid, entry_fee, exec_type
+                                    )
+                                    bot_state["daily_pnl"] += net_pnl
+                                    bot_state["daily_pnl_coins"][sym] = bot_state["daily_pnl_coins"].get(sym, 0.0) + net_pnl
+                                    bot_state["trades_count"] += 1
+                                    if net_pnl > 0:
+                                        bot_state["winning_count"] += 1
+                                    database.archive_closed_trade({
+                                        "id": pos["id"], "bot_name": bKey, "symbol": sym,
+                                        "entry_price": entry, "exit_price": real_exit,
+                                        "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                        "net_pnl": net_pnl, "reason": f"{reason} [{MTF_TF_LABELS.get(tf, tf)}]",
+                                        "entry_time": pos["time"], "exit_time": get_current_iso_time()
+                                    })
+                                    database.delete_active_trade(pos["id"])
+                                    add_log(f"💰 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}] إغلاق {sym} | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    open_count = max(0, open_count - 1)
+                                    used_cap = max(0.0, used_cap - position_notional(pos))
+                                    refresh_asset_balance_from_exchange(base_asset)
+                                else:
+                                    if "30005" in str(res) or "Oversold" in str(res):
+                                        handle_oversold_exit(bKey, sym, pos, entry, exec_type, reason)
+                                    else:
+                                        still_sym.append(pos)
+                            else:
+                                still_sym.append(pos)
+
+                        bot_state["active_positions"][sym] = still_sym
+
+                        # Entries per enabled timeframe
+                        if cfg.get("status") != "RUNNING":
+                            continue
+                        entries_ok, _lock = bot_entries_allowed(bot_state)
+                        if not entries_ok:
+                            continue
+
+                        for tf in MTF_TF_ORDER:
+                            tf_cfg = mtf.get(tf) or {}
+                            if not tf_cfg.get("enabled"):
+                                continue
+                            size = float(tf_cfg.get("trade_size_usdt", 15.0))
+                            if size <= 0:
+                                continue
+
+                            same_tf_count = sum(1 for p in bot_state["active_positions"].get(sym, []) if (p.get("timeframe") or (p.get("meta") or {}).get("timeframe")) == tf)
+                            coin_count = len(bot_state["active_positions"].get(sym, []))
+                            if same_tf_count > 0:
+                                continue
+                            if coin_count >= max_con:
+                                continue
+                            if open_count >= max_open:
+                                break
+                            if (used_cap + size) > max_alloc:
+                                continue
+                            if shared_state["real_balance_usdt"] < size:
+                                push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym}/{tf} (مطلوب {size}$)", cooldown_sec=300)
+                                continue
+
+                            candles = fetch_klines(sym, interval=tf, limit=45)
+                            if not candles:
+                                continue
+                            latest_candle_time = candles[-1]["time"]
+                            lock_key = f"{bKey}_{sym}_{tf}"
+                            if LAST_ENTRY_CANDLE.get(lock_key) == latest_candle_time:
+                                continue
+
+                            ok_sig, _ewo = ewo_rebound_signal(candles)
+                            if not ok_sig:
+                                continue
+
+                            if hierarchical and not mtf_hierarchy_ok(sym, tf, mtf):
+                                continue
+
+                            q = float(format_quantity(sym, size / ask))
+                            if q <= 0:
+                                continue
+                            if exec_type == "CHASE_LIMIT":
+                                ok, res = execute_smart_chase_order(sym, "BUY", quote_qty=size)
+                            else:
+                                ok, res = place_order(sym, "BUY", qty=q, quote_qty=size, order_type="MARKET")
+                            if not ok:
+                                continue
+
+                            LAST_ENTRY_CANDLE[lock_key] = latest_candle_time
+                            id_pfx = "bot_ewo_mtfh" if hierarchical else "bot_ewo_mtf"
+                            trade_id = f"{id_pfx}_{tf}_{int(time.time()*1000)}"
+                            time_str = get_current_iso_time()
+                            fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
+                            tp_pct = float(tf_cfg.get("tp_pct", 0.022))
+                            sl_pct = float(tf_cfg.get("sl_pct", 0.010))
+                            hier_parent = database.normalize_hierarchy_parent(tf, tf_cfg.get("hierarchy_parent", "off")) if hierarchical else "off"
+                            meta = {
+                                "timeframe": tf,
+                                "trade_size_usdt": size,
+                                "tp_pct": tp_pct,
+                                "sl_pct": sl_pct,
+                                "be_enabled": bool(tf_cfg.get("be_enabled", False)),
+                                "be_trigger_pct": float(tf_cfg.get("be_trigger_pct", 0.012)),
+                                "trail_enabled": bool(tf_cfg.get("trail_enabled", False)),
+                                "trail_trigger_pct": float(tf_cfg.get("trail_trigger_pct", 0.018)),
+                                "trail_cb_pct": float(tf_cfg.get("trail_cb_pct", 0.006)),
+                                "be_armed": False,
+                                "trail_armed": False,
+                                "hierarchical": hierarchical,
+                                "hierarchy_parent": hier_parent,
+                                "entry_fee_rate": entry_fee
+                            }
+                            t_obj = {
+                                "id": trade_id, "bot_name": bKey, "symbol": sym,
+                                "entry_price": fill_entry, "highest_price": fill_entry, "qty": fill_qty,
+                                "tp_pct": tp_pct, "sl_pct": sl_pct, "time_str": time_str,
+                                "timeframe": tf, "meta": meta
+                            }
+                            database.insert_active_trade(t_obj)
+                            bot_state["active_positions"].setdefault(sym, []).append({
+                                "id": trade_id, "entry_price": fill_entry, "highest_price": fill_entry, "qty": fill_qty,
+                                "tp_pct": tp_pct, "sl_pct": sl_pct, "time": time_str,
+                                "timeframe": tf, "meta": meta, "entry_fee_rate": entry_fee,
+                                "be_armed": False, "trail_armed": False
+                            })
+                            open_count += 1
+                            used_cap += size
+                            mode_tag = ""
+                            if hierarchical:
+                                parent_lab = "off" if hier_parent == "off" else MTF_TF_LABELS.get(hier_parent, hier_parent)
+                                mode_tag = f" H→{parent_lab}"
+                            add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {fmt_usd(fill_entry)}$ بحجم {size}$ ({actual_exec_label(exec_type, res)})", "buys", "primary")
 
         except Exception as e:
             add_log(f"خطأ محرك التداول: {e}", "system", "warning")
@@ -960,9 +2006,63 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             bot_name = params.get("bot_name", [None])[0]
-            trades = database.get_closed_trades(bot_name)
+            try:
+                limit = int(params.get("limit", [70])[0])
+            except Exception:
+                limit = 70
+            limit = max(1, min(limit, 2000))
+            trades = database.get_closed_trades(bot_name, limit=limit)
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps(trades, ensure_ascii=False).encode('utf-8'))
+
+        elif self.path.startswith('/api/export_closed'):
+            query = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(query)
+            bot_name = params.get("bot_name", [None])[0]
+            trades = database.get_closed_trades(bot_name, limit=2000)
+            lines = ["id,bot_name,symbol,entry_price,exit_price,qty,gross_pnl,fee_usd,net_pnl,reason,entry_time,exit_time"]
+            for t in trades:
+                lines.append(",".join([
+                    str(t.get("id", "")),
+                    str(t.get("bot_name", "")),
+                    str(t.get("symbol", "")),
+                    str(t.get("entry_price", "")),
+                    str(t.get("exit_price", "")),
+                    str(t.get("qty", "")),
+                    str(t.get("gross_pnl", "")),
+                    str(t.get("fee_usd", "")),
+                    str(t.get("net_pnl", "")),
+                    '"' + str(t.get("reason", "")).replace('"', "'") + '"',
+                    str(t.get("entry_time", "")),
+                    str(t.get("exit_time", ""))
+                ]))
+            csv_body = "\n".join(lines)
+            fname = f"closed_{(bot_name or 'ALL')}.csv"
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.end_headers()
+            self.wfile.write(csv_body.encode('utf-8'))
+
+        elif self.path.startswith('/api/export_logs'):
+            query = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(query)
+            bot_name = (params.get("bot_name", [""])[0] or "").strip()
+            lines = []
+            for l in shared_state.get("recent_logs", []):
+                msg = str(l.get("msg", ""))
+                if bot_name and bot_name not in msg and bot_name.replace("_", " ") not in msg:
+                    # also allow BOT_X / bot_x case variants
+                    if bot_name.lower() not in msg.lower():
+                        continue
+                lines.append(f"[{l.get('time','')}] ({l.get('cat','')}/{l.get('type','')}) {msg}")
+            body = "\n".join(lines) if lines else "لا توجد سجلات مطابقة"
+            fname = f"logs_{(bot_name or 'ALL')}.txt"
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.end_headers()
+            self.wfile.write(body.encode('utf-8'))
 
         elif self.path == '/sniper':
             try:
@@ -984,8 +2084,34 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
                 self.wfile.write(b"<h3>analytics.html not found.</h3><a href='/'>Back</a>")
 
+        elif self.path.startswith('/api/ewo_chart'):
+            try:
+                query = urllib.parse.urlparse(self.path).query
+                params = urllib.parse.parse_qs(query)
+                sym = params.get("symbol", ["ETHUSDT"])[0]
+                try:
+                    limit = int(params.get("limit", [80])[0])
+                except Exception:
+                    limit = 80
+                payload = build_ewo_chart_payload(sym, limit=limit)
+                self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+                self.wfile.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+            except Exception as e:
+                self.send_response(500); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}, ensure_ascii=False).encode('utf-8'))
+
         elif self.path == '/api/logout':
             self.send_response(200); self.send_header('Set-Cookie', 'session_id=; Path=/; Max-Age=0'); self.end_headers()
+
+        elif self.path == '/ewo':
+            try:
+                with open("ewo.html", "r", encoding="utf-8") as f:
+                    html_c = f.read()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(html_c.encode('utf-8'))
+            except Exception:
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.end_headers()
+                self.wfile.write(b"<h3>ewo.html not found.</h3><a href='/'>Back</a>")
 
         else:
             try:
@@ -1058,18 +2184,20 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     ok, res = place_order(sym, "BUY", qty=q, quote_qty=size, order_type="MARKET")
 
                 if ok:
+                    fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, o_type)
                     snp_id = f"snp_{int(time.time()*1000)}"
                     time_str = get_current_iso_time()
                     snp_trade = {
-                        "id": snp_id, "sniper_profile": prof, "symbol": sym, "entry_price": ask,
-                        "highest_price": ask, "qty": q, "orig_qty": q,
+                        "id": snp_id, "sniper_profile": prof, "symbol": sym, "entry_price": fill_entry,
+                        "highest_price": fill_entry, "qty": fill_qty, "orig_qty": fill_qty,
                         "tp1_pct": tp1_pct, "tp2_pct": tp2_pct,
                         "sl_pct": sl_pct, "trailing_cb": ts_cb,
-                        "tp1_hit": 0, "time_str": time_str
+                        "tp1_hit": 0, "time_str": time_str,
+                        "entry_fee_rate": entry_fee
                     }
                     database.insert_sniper_trade(snp_trade)
                     shared_state["sniper_positions"].append(snp_trade)
-                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {ask}$ (كمية: {q})"
+                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {fmt_usd(fill_entry)}$ (كمية: {fmt_qty(fill_qty)})"
                     add_log(msg, "buys", "primary")
                 else:
                     msg = f"❌ فشل القنص: {res}"
@@ -1085,23 +2213,23 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             base_asset = sym.replace("USDT", "").replace("USDC", "")
             for sp in shared_state.get("sniper_positions", []):
                 if sp["id"] == s_id:
-                    avail = get_asset_free_balance(base_asset)
-                    sell_qty = min(sp["qty"], avail)
+                    sell_qty = compute_sell_qty(sym, sp["qty"])
                     if float(format_quantity(sym, sell_qty)) > 0:
                         ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
-                        usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                        real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else (bid if bid else sp["entry_price"])
-                        gross_pnl = (real_exit - sp["entry_price"]) * sell_qty
-                        fee_usd = (sp["entry_price"] * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
-                        net_pnl = gross_pnl - fee_usd
+                        if ok:
+                            entry_fee = position_entry_fee_rate(sp, "MARKET")
+                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                sp["entry_price"], sell_qty, res, bid, entry_fee, "MARKET"
+                            )
                         
-                        database.archive_closed_trade({
-                            "id": s_id, "bot_name": sp.get("sniper_profile", "SNIPER_1"), "symbol": sym,
-                            "entry_price": sp["entry_price"], "exit_price": real_exit,
-                            "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
-                            "net_pnl": net_pnl, "reason": "إغلاق يدوي للقناص",
-                            "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
-                        })
+                            database.archive_closed_trade({
+                                "id": s_id, "bot_name": sp.get("sniper_profile", "SNIPER_1"), "symbol": sym,
+                                "entry_price": sp["entry_price"], "exit_price": real_exit,
+                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "net_pnl": net_pnl, "reason": "إغلاق يدوي للقناص",
+                                "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
+                            })
+                            refresh_asset_balance_from_exchange(base_asset)
                     database.delete_sniper_trade(s_id)
                     add_log(f"🔥 تسييل صفقة قناص {sym} يدوي", "sells", "danger")
                     break
@@ -1163,8 +2291,19 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == '/api/save_bot_config':
             b_name = data.pop("bot_name", "BOT_1")
+            before = database.get_bot_config(b_name) or {}
+            # Normalize MTF hierarchy parents before save
+            if isinstance(data.get("mtf_settings"), dict):
+                data["mtf_settings"] = database.parse_mtf_settings(data.get("mtf_settings"))
             database.update_bot_config(b_name, data)
-            add_log(f"تم حفظ إعدادات {b_name}", "system", "info")
+            after = database.get_bot_config(b_name) or {}
+            # Prefer request payload values for change summary when present
+            merged_after = dict(after)
+            merged_after.update(data)
+            if "mtf_settings" in data:
+                merged_after["mtf_settings"] = data["mtf_settings"]
+            for line in summarize_bot_config_changes(b_name, before, merged_after):
+                add_log(line, "system", "info")
             self.send_response(200); self.end_headers()
 
         elif self.path == '/api/add_symbol':
@@ -1220,21 +2359,24 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                 if ok:
                     trade_id = f"{b_name.lower()}_{int(time.time()*1000)}"
                     time_str = get_current_iso_time()
+                    fill_entry, fill_qty, entry_fee = build_entry_from_fill(res, ask, q, exec_type)
                     t_obj = {
                         'id': trade_id, 'bot_name': b_name, 'symbol': sym,
-                        'entry_price': ask, 'highest_price': ask, 'qty': q,
+                        'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
                         'tp_pct': float(cfg.get("tp_pct", 0.025)),
                         'sl_pct': float(cfg.get("sl_pct", 0.012)),
-                        'time_str': time_str
+                        'time_str': time_str,
+                        'meta': {'entry_fee_rate': entry_fee}
                     }
                     database.insert_active_trade(t_obj)
                     if sym not in shared_state["bots"][b_name]["active_positions"]:
                         shared_state["bots"][b_name]["active_positions"][sym] = []
                     shared_state["bots"][b_name]["active_positions"][sym].append({
-                        'id': trade_id, 'entry_price': ask, 'highest_price': ask, 'qty': q,
-                        'tp_pct': t_obj['tp_pct'], 'sl_pct': t_obj['sl_pct'], 'time': time_str
+                        'id': trade_id, 'entry_price': fill_entry, 'highest_price': fill_entry, 'qty': fill_qty,
+                        'tp_pct': t_obj['tp_pct'], 'sl_pct': t_obj['sl_pct'], 'time': time_str,
+                        'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                     })
-                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {ask}$ ({exec_type})"
+                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {fmt_usd(fill_entry)}$ ({actual_exec_label(exec_type, res)})"
                     add_log(msg, "buys", "primary")
                 else: msg = f"❌ فشل الشراء: {res}"
             else: msg = "فشل قراءة السعر"
@@ -1253,33 +2395,44 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             for p in shared_state["bots"][b_name]["active_positions"].get(sym, []):
                 if p.get("id") == pos_id and not found:
                     found = True
-                    avail = get_asset_free_balance(base_asset)
-                    sell_qty = min(p['qty'], avail)
+                    sell_qty = compute_sell_qty(sym, p['qty'])
 
                     if float(format_quantity(sym, sell_qty)) > 0:
-                        ok, res = place_order(sym, "SELL", qty=sell_qty)
-                        usd_rec = float(res.get("cummulativeQuoteQty", 0.0))
-                        real_exit = (usd_rec / sell_qty) if (usd_rec > 0 and sell_qty > 0) else (bid if bid else p['entry_price'])
-                        gross_pnl = (real_exit - p['entry_price']) * sell_qty
-                        fee_usd = (p['entry_price'] * sell_qty * 0.001) + (real_exit * sell_qty * 0.001)
-                        net_pnl = gross_pnl - fee_usd
+                        cfg = database.get_bot_config(b_name)
+                        exec_type = cfg.get("order_exec_type", "CHASE_LIMIT")
+                        if exec_type == "CHASE_LIMIT":
+                            ok, res = execute_smart_chase_order(sym, "SELL", qty=sell_qty)
+                        else:
+                            ok, res = place_order(sym, "SELL", qty=sell_qty, order_type="MARKET")
+                        if ok:
+                            entry_fee = position_entry_fee_rate(p, exec_type)
+                            real_exit, sold_qty, gross_pnl, fee_usd, net_pnl = settle_exit_pnl(
+                                p['entry_price'], sell_qty, res, bid, entry_fee, exec_type
+                            )
 
-                        shared_state["bots"][b_name]["daily_pnl"] += net_pnl
-                        shared_state["bots"][b_name]["daily_pnl_coins"][sym] += net_pnl
-                        shared_state["bots"][b_name]["trades_count"] += 1
-                        if net_pnl > 0: shared_state["bots"][b_name]["winning_count"] += 1
-                        
-                        database.archive_closed_trade({
-                            "id": pos_id, "bot_name": b_name, "symbol": sym,
-                            "entry_price": p["entry_price"], "exit_price": real_exit,
-                            "qty": sell_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
-                            "net_pnl": net_pnl, "reason": "يدوي (Manual)",
-                            "entry_time": p["time"], "exit_time": get_current_iso_time()
-                        })
-                        add_log(f"🔥 تسييل {sym} في {b_name} بسعر {real_exit}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
+                            shared_state["bots"][b_name]["daily_pnl"] += net_pnl
+                            shared_state["bots"][b_name]["daily_pnl_coins"][sym] = shared_state["bots"][b_name]["daily_pnl_coins"].get(sym, 0.0) + net_pnl
+                            shared_state["bots"][b_name]["trades_count"] += 1
+                            if net_pnl > 0: shared_state["bots"][b_name]["winning_count"] += 1
+                            
+                            database.archive_closed_trade({
+                                "id": pos_id, "bot_name": b_name, "symbol": sym,
+                                "entry_price": p["entry_price"], "exit_price": real_exit,
+                                "qty": sold_qty, "gross_pnl": gross_pnl, "fee_usd": fee_usd,
+                                "net_pnl": net_pnl, "reason": "يدوي (Manual)",
+                                "entry_time": p["time"], "exit_time": get_current_iso_time()
+                            })
+                            database.delete_active_trade(pos_id)
+                            add_log(f"🔥 تسييل {sym} في {b_name} بسعر {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
+                            refresh_asset_balance_from_exchange(base_asset)
+                        else:
+                            if "30005" in str(res) or "Oversold" in str(res):
+                                handle_oversold_exit(b_name, sym, p, p['entry_price'], exec_type, "يدوي")
+                            else:
+                                new_positions.append(p)
+                            continue
                     else:
-                        database.delete_active_trade(pos_id)
-                        add_log(f"⚠️ الرصيد 0، حذفت الصفقة", "system", "warning")
+                        handle_oversold_exit(b_name, sym, p, p['entry_price'], "MARKET", "يدوي")
                 else:
                     new_positions.append(p)
             shared_state["bots"][b_name]["active_positions"][sym] = new_positions
@@ -1380,42 +2533,112 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == '/api/convert_dust_direct':
             total_sold_usd = 0.0
+            sold_n = 0
+            skip_min = 0
+            skip_unsup = 0
+            skip_other = 0
             for a in shared_state.get("wallet_assets", []):
-                asset = a["asset"]
-                free_qty = float(a["free"])
-                val_usd = float(a.get("usd_value", 0.0))
-                if asset not in ["USDT", "USDC", "MX"] and val_usd < 5.0 and free_qty > 0:
-                    sym = f"{asset}USDT"
-                    ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
-                    if ok: total_sold_usd += val_usd
+                asset = a.get("asset")
+                if asset in ("USDT", "USDC", "MX"):
+                    continue
+                free_qty = float(a.get("free", 0.0) or 0.0)
+                val_usd = float(a.get("usd_value", 0.0) or 0.0)
+                if free_qty <= 0:
+                    continue
+                # Dust window: sellable only if >= exchange min notional and < 5$
+                if val_usd >= 5.0:
+                    continue
+                ok_can, info = can_market_sell_wallet_asset(a, min_notional=MIN_SELL_NOTIONAL_USDT)
+                if not ok_can:
+                    if info == "below_min":
+                        skip_min += 1
+                    elif info == "unsupported":
+                        skip_unsup += 1
+                    else:
+                        skip_other += 1
+                    continue
+                sym = info
+                ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
+                if ok:
+                    total_sold_usd += val_usd
+                    sold_n += 1
+                else:
+                    err_s = str(res)
+                    if "10007" in err_s or "not support api" in err_s.lower():
+                        skip_unsup += 1
+                    elif "30002" in err_s:
+                        skip_min += 1
+                    else:
+                        skip_other += 1
             if total_sold_usd > 1.0:
                 place_order("MXUSDT", "BUY", quote_qty=total_sold_usd, order_type="MARKET")
-                msg = f"✅ تم تحويل الأرصدة الصغيرة لـ MX بقيمة {total_sold_usd:.2f}$"
+                msg = f"✅ تحويل غبار→MX: بيع {sold_n} بقيمة {total_sold_usd:.2f}$"
             else:
-                msg = "لا توجد أرصدة صغيرة للتحويل"
+                msg = "لا توجد أرصدة صغيرة قابلة للتحويل (≥1$ و <5$)"
+            skip_bits = []
+            if skip_min:
+                skip_bits.append(f"{skip_min} دون حد 1$")
+            if skip_unsup:
+                skip_bits.append(f"{skip_unsup} غير مدعوم API")
+            if skip_other:
+                skip_bits.append(f"{skip_other} أخرى")
+            if skip_bits:
+                msg += " | تخطي: " + "، ".join(skip_bits)
             add_log(msg, "system", "info")
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
         elif self.path == '/api/panic_all':
             sold_count = 0
+            skip_min = 0
+            skip_unsup = 0
+            skip_other = 0
             for a in shared_state.get("wallet_assets", []):
-                asset = a["asset"]
-                free_qty = float(a["free"])
-                if asset != "USDT" and free_qty > 0:
-                    sym = f"{asset}USDT"
-                    ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
-                    if ok:
-                        sold_count += 1
-                        for bKey in BOT_KEYS:
-                            for p in shared_state["bots"][bKey]["active_positions"].get(sym, []):
-                                database.delete_active_trade(p["id"])
-                            shared_state["bots"][bKey]["active_positions"][sym] = []
-                        for sp in shared_state.get("sniper_positions", []):
-                            if sp["symbol"] == sym:
-                                database.delete_sniper_trade(sp["id"])
-                        shared_state["sniper_positions"] = [sp for sp in shared_state.get("sniper_positions", []) if sp["symbol"] != sym]
-            msg = f"✅ تم تسييل {sold_count} عملات إلى USDT وتصفير كافة الصفقات" if sold_count > 0 else "لا توجد عملات متاحة"
+                asset = a.get("asset")
+                free_qty = float(a.get("free", 0.0) or 0.0)
+                if asset == "USDT" or free_qty <= 0:
+                    continue
+                ok_can, info = can_market_sell_wallet_asset(a, min_notional=MIN_SELL_NOTIONAL_USDT)
+                if not ok_can:
+                    if info == "below_min":
+                        skip_min += 1
+                    elif info == "unsupported":
+                        skip_unsup += 1
+                        add_log(f"⚠️ تخطي {asset}: غير مدعوم عبر API", "system", "warning")
+                    else:
+                        skip_other += 1
+                    continue
+                sym = info
+                ok, res = place_order(sym, "SELL", qty=free_qty, order_type="MARKET")
+                if ok:
+                    sold_count += 1
+                    for bKey in BOT_KEYS:
+                        for p in shared_state["bots"][bKey]["active_positions"].get(sym, []):
+                            database.delete_active_trade(p["id"])
+                        shared_state["bots"][bKey]["active_positions"][sym] = []
+                    for sp in shared_state.get("sniper_positions", []):
+                        if sp["symbol"] == sym:
+                            database.delete_sniper_trade(sp["id"])
+                    shared_state["sniper_positions"] = [sp for sp in shared_state.get("sniper_positions", []) if sp["symbol"] != sym]
+                else:
+                    err_s = str(res)
+                    if "10007" in err_s or "not support api" in err_s.lower():
+                        skip_unsup += 1
+                    elif "30002" in err_s:
+                        skip_min += 1
+                    else:
+                        skip_other += 1
+            msg = f"✅ تم تسييل {sold_count} عملات إلى USDT وتصفير كافة الصفقات" if sold_count > 0 else "لا توجد عملات قابلة للتسييل (≥1$ ومدعومة API)"
+            skip_bits = []
+            if skip_min:
+                skip_bits.append(f"{skip_min} دون حد 1$")
+            if skip_unsup:
+                skip_bits.append(f"{skip_unsup} غير مدعوم API")
+            if skip_other:
+                skip_bits.append(f"{skip_other} أخرى")
+            if skip_bits:
+                msg += " | تخطي: " + "، ".join(skip_bits)
+            add_log(msg, "system", "info")
             self.send_response(200); self.send_header('Content-Type', 'application/json; charset=utf-8'); self.end_headers()
             self.wfile.write(json.dumps({"msg": msg}, ensure_ascii=False).encode('utf-8'))
 
