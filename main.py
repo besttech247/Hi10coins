@@ -677,11 +677,37 @@ def clean_qty(qty, decimals=8):
         return qty
 
 def fmt_usd(price, decimals=8):
+    """Human price string without scientific notation."""
     try:
-        s = f"{clean_price(price, decimals):.{int(decimals)}f}".rstrip("0").rstrip(".")
+        p = float(price)
+        d = int(decimals)
+        if abs(p) > 0 and abs(p) < 1e-4:
+            d = max(d, 10)
+        s = f"{p:.{d}f}".rstrip("0").rstrip(".")
         return s if s else "0"
     except (TypeError, ValueError):
         return str(price)
+
+def fmt_qty(qty, decimals=8):
+    try:
+        q = float(qty)
+        s = f"{q:.{int(decimals)}f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+    except (TypeError, ValueError):
+        return str(qty)
+
+def actual_exec_label(exec_type, order_res=None):
+    """Show real fill mode (Market fallback vs Chase) in logs."""
+    mode = None
+    if isinstance(order_res, dict):
+        mode = str(order_res.get("_fee_mode") or "").upper()
+        if not mode:
+            mode = str(order_res.get("type") or "").upper()
+    if mode in ("MARKET", "TAKER"):
+        return "MARKET"
+    if mode in ("CHASE_LIMIT", "LIMIT", "MAKER"):
+        return "CHASE_LIMIT" if str(exec_type or "").upper() == "CHASE_LIMIT" else "LIMIT"
+    return str(exec_type or "MARKET")
 
 def build_entry_from_fill(res, price_fallback, qty_hint, exec_type):
     avg, filled = resolve_fill(res, qty_hint=qty_hint, price_fallback=price_fallback)
@@ -815,7 +841,7 @@ def place_order(symbol, side, qty=None, quote_qty=None, order_type="MARKET", pri
         else:
             return False, "تحديد الكمية مطلوب"
     
-    price_info = f" بسعر {price}$" if price else (f" بقيمة {quote_qty}$" if quote_qty else f" بكمية {qty}")
+    price_info = f" بسعر {fmt_usd(price)}$" if price else (f" بقيمة {fmt_usd(quote_qty)}$" if quote_qty else f" بكمية {fmt_qty(qty)}")
     add_log(f"📤 طلب {side.upper()} {symbol} ({order_type}){price_info}", "orders", "info")
     ok, res = mexc_private_request("/api/v3/order", method="POST", params=params)
     if not ok:
@@ -1019,7 +1045,7 @@ def trading_engine_loop():
                             sp["tp1_hit"] = 1
                             sp["qty"] -= sold_qty
                             database.update_sniper_trade(sp["id"], {"tp1_hit": 1, "qty": sp["qty"]})
-                            add_log(f"🎯 [{prof_name}] بيع 50% لـ {sym} عند {real_exit}$ | ربح: {net_pnl:+.3f}$ وتأمين الدخول", "sells", "success")
+                            add_log(f"🎯 [{prof_name}] بيع 50% لـ {sym} عند {fmt_usd(real_exit)}$ | ربح: {net_pnl:+.3f}$ وتأمين الدخول", "sells", "success")
 
                 effective_sl = entry if sp.get("tp1_hit") else sl_price
                 cb_pct = sp.get("trailing_cb", 0.006)
@@ -1051,7 +1077,7 @@ def trading_engine_loop():
                                 "entry_time": sp["time_str"], "exit_time": get_current_iso_time()
                             })
                             database.delete_sniper_trade(sp["id"])
-                            add_log(f"💰 [{prof_name}] إغلاق نهائي لـ {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                            add_log(f"💰 [{prof_name}] إغلاق نهائي لـ {sym} | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                         else:
                             still_snipers.append(sp)
                     else:
@@ -1179,7 +1205,7 @@ def trading_engine_loop():
                                                 "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                             })
                                             database.delete_active_trade(pos["id"])
-                                            add_log(f"💰 [{bKey}] بيع {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                            add_log(f"💰 [{bKey}] بيع {sym} | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                         else:
                                             if "30005" in str(res) or "Oversold" in str(res):
                                                 push_ops_alert("oversold", f"{bKey}: رصيد غير كافٍ لإغلاق {sym} (Oversold) — حُذفت من التتبع")
@@ -1226,7 +1252,7 @@ def trading_engine_loop():
                                                     'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                                                 })
                                                 current_used_cap += size
-                                                add_log(f"🚀 [{bKey}] شراء {sym} عند {fmt_usd(fill_entry)}$ ({exec_type})", "buys", "primary")
+                                                add_log(f"🚀 [{bKey}] شراء {sym} عند {fmt_usd(fill_entry)}$ ({actual_exec_label(exec_type, res)})", "buys", "primary")
                                     else:
                                         push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym} (مطلوب {size}$)", cooldown_sec=300)
 
@@ -1302,7 +1328,7 @@ def trading_engine_loop():
                                         "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
                                     database.delete_active_trade(pos["id"])
-                                    add_log(f"💰 [{bKey}] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    add_log(f"💰 [{bKey}] إغلاق {sym} | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                 else:
                                     if "30005" in str(res) or "Oversold" in str(res):
                                         push_ops_alert("oversold", f"{bKey}: رصيد غير كافٍ لإغلاق {sym} (Oversold) — حُذفت من التتبع")
@@ -1348,7 +1374,7 @@ def trading_engine_loop():
                                             'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                                         })
                                         current_used_cap += size
-                                        add_log(f"🧪 [{bKey}] شراء {sym} عند {fmt_usd(fill_entry)}$ ({exec_type}) | EWO+HTF+Confirm", "buys", "primary")
+                                        add_log(f"🧪 [{bKey}] شراء {sym} عند {fmt_usd(fill_entry)}$ ({actual_exec_label(exec_type, res)}) | EWO+HTF+Confirm", "buys", "primary")
                             else:
                                 push_ops_alert("balance", f"{bKey}: رصيد USDT غير كافٍ لشراء {sym} (مطلوب {size}$)", cooldown_sec=300)
 
@@ -1467,7 +1493,7 @@ def trading_engine_loop():
                                         "entry_time": pos["time"], "exit_time": get_current_iso_time()
                                     })
                                     database.delete_active_trade(pos["id"])
-                                    add_log(f"💰 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}] إغلاق {sym} | خروج: {real_exit}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
+                                    add_log(f"💰 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}] إغلاق {sym} | خروج: {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$ ({reason})", "sells", "success" if net_pnl > 0 else "danger")
                                     open_count = max(0, open_count - 1)
                                     used_cap = max(0.0, used_cap - position_notional(pos))
                                 else:
@@ -1578,7 +1604,7 @@ def trading_engine_loop():
                             if hierarchical:
                                 parent_lab = "off" if hier_parent == "off" else MTF_TF_LABELS.get(hier_parent, hier_parent)
                                 mode_tag = f" H→{parent_lab}"
-                            add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {fmt_usd(fill_entry)}$ بحجم {size}$ ({exec_type})", "buys", "primary")
+                            add_log(f"📐 [{bKey}][{MTF_TF_LABELS.get(tf, tf)}]{mode_tag} شراء {sym} عند {fmt_usd(fill_entry)}$ بحجم {size}$ ({actual_exec_label(exec_type, res)})", "buys", "primary")
 
         except Exception as e:
             add_log(f"خطأ محرك التداول: {e}", "system", "warning")
@@ -1923,7 +1949,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                     }
                     database.insert_sniper_trade(snp_trade)
                     shared_state["sniper_positions"].append(snp_trade)
-                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {fmt_usd(fill_entry)}$ (كمية: {fill_qty})"
+                    msg = f"🎯 تم إطلاق {prof} لـ {sym} عند {fmt_usd(fill_entry)}$ (كمية: {fmt_qty(fill_qty)})"
                     add_log(msg, "buys", "primary")
                 else:
                     msg = f"❌ فشل القنص: {res}"
@@ -2102,7 +2128,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                         'tp_pct': t_obj['tp_pct'], 'sl_pct': t_obj['sl_pct'], 'time': time_str,
                         'entry_fee_rate': entry_fee, 'meta': {'entry_fee_rate': entry_fee}
                     })
-                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {fmt_usd(fill_entry)}$ ({exec_type})"
+                    msg = f"✅ تم شراء {sym} عبر {b_name} عند {fmt_usd(fill_entry)}$ ({actual_exec_label(exec_type, res)})"
                     add_log(msg, "buys", "primary")
                 else: msg = f"❌ فشل الشراء: {res}"
             else: msg = "فشل قراءة السعر"
@@ -2150,7 +2176,7 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
                                 "entry_time": p["time"], "exit_time": get_current_iso_time()
                             })
                             database.delete_active_trade(pos_id)
-                            add_log(f"🔥 تسييل {sym} في {b_name} بسعر {real_exit}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
+                            add_log(f"🔥 تسييل {sym} في {b_name} بسعر {fmt_usd(real_exit)}$ | صافي: {net_pnl:+.3f}$", "sells", "danger")
                         else:
                             new_positions.append(p)
                             continue
