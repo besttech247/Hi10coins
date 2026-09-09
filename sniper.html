@@ -257,9 +257,10 @@ th{color:var(--sub)}
   <!-- 4. صفقات وأوامر القناص -->
   <details open class="card" id="sniper-trades-box">
     <summary style="display:flex;justify-content:space-between;align-items:center">
-      <div style="display:flex;align-items:center;gap:6px">
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
         <span style="color:#fbbf24">📂 صفقات وأوامر القناص</span>
-        <span style="font-size:11px;color:var(--sub)">(Live PnL: <strong id="snp-live-pnl-header" style="color:#10b981">+0.00$</strong>)</span>
+        <span style="font-size:11px;color:var(--sub)">مفتوحة: <strong id="snp-live-pnl-header" style="color:#10b981">+0.00$</strong></span>
+        <span style="font-size:11px;color:var(--sub)">مغلقة: <strong id="snp-closed-pnl-header" style="color:#10b981">+0.00$</strong></span>
       </div>
       <button class="icon-btn" style="background:#334155;color:#fff;font-size:11px" onclick="toggleManage('sniper-trades-box'); event.stopPropagation();" title="إظهار/إخفاء أزرار الإجراءات">⚙️</button>
     </summary>
@@ -275,13 +276,13 @@ th{color:var(--sub)}
         <table id="sniper-pos-table">
           <thead>
             <tr>
-              <th>النوع</th>
+              <th onclick="sortTable('sniper-pos-table', 0)" style="cursor:pointer">النوع ⇕</th>
               <th onclick="sortTable('sniper-pos-table', 1)" style="cursor:pointer">العملة ⇕</th>
-              <th>الدخول</th>
-              <th>أعلى سعر</th>
-              <th>الكمية</th>
+              <th onclick="sortTable('sniper-pos-table', 2)" style="cursor:pointer">الدخول ⇕</th>
+              <th onclick="sortTable('sniper-pos-table', 3)" style="cursor:pointer">أعلى سعر ⇕</th>
+              <th onclick="sortTable('sniper-pos-table', 4)" style="cursor:pointer">الكمية ⇕</th>
               <th onclick="sortTable('sniper-pos-table', 5)" style="cursor:pointer">Live PnL ⇕</th>
-              <th>حالة الهدف</th>
+              <th onclick="sortTable('sniper-pos-table', 6)" style="cursor:pointer">حالة الهدف ⇕</th>
               <th onclick="sortTable('sniper-pos-table', 7)" style="cursor:pointer">الوقت ⇕</th>
               <th class="manage-ctrl">إجراءات</th>
             </tr>
@@ -305,7 +306,17 @@ th{color:var(--sub)}
     <div id="p-closed" class="inner-pane">
       <div style="overflow-x:auto">
         <table id="snp-closed-table">
-          <thead><tr><th>النوع</th><th>العملة</th><th>الدخول</th><th>الخروج</th><th>الكمية</th><th>صافي الربح</th><th>العمولة</th><th>السبب</th><th onclick="sortTable('snp-closed-table', 8)" style="cursor:pointer">الوقت والتاريخ ⇕</th></tr></thead>
+          <thead><tr>
+            <th onclick="sortTable('snp-closed-table', 0)" style="cursor:pointer">النوع ⇕</th>
+            <th onclick="sortTable('snp-closed-table', 1)" style="cursor:pointer">العملة ⇕</th>
+            <th onclick="sortTable('snp-closed-table', 2)" style="cursor:pointer">الدخول ⇕</th>
+            <th onclick="sortTable('snp-closed-table', 3)" style="cursor:pointer">الخروج ⇕</th>
+            <th onclick="sortTable('snp-closed-table', 4)" style="cursor:pointer">الكمية ⇕</th>
+            <th onclick="sortTable('snp-closed-table', 5)" style="cursor:pointer">صافي الربح ⇕</th>
+            <th onclick="sortTable('snp-closed-table', 6)" style="cursor:pointer">العمولة ⇕</th>
+            <th onclick="sortTable('snp-closed-table', 7)" style="cursor:pointer">السبب ⇕</th>
+            <th onclick="sortTable('snp-closed-table', 8)" style="cursor:pointer">الوقت والتاريخ ⇕</th>
+          </tr></thead>
           <tbody><tr><td colspan="9" style="text-align:center;color:var(--sub)">لا توجد صفقات مؤرشفة</td></tr></tbody>
         </table>
       </div>
@@ -316,7 +327,17 @@ th{color:var(--sub)}
   <details class="card" open>
     <summary style="display:flex;justify-content:space-between;align-items:center">
       <span>📜 السجل المباشر</span>
-      <div style="display:flex;gap:4px" onclick="event.stopPropagation()">
+      <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap" onclick="event.stopPropagation()">
+        <select id="log-bot-filter" style="width:auto;min-width:90px;padding:2px 4px;font-size:10px" onchange="renderLogs()">
+          <option value="all">كل البوتات</option>
+          <option value="SNIPER" selected>قناص</option>
+          <option value="BOT_1">Bot 1</option>
+          <option value="BOT_X1">X1</option>
+          <option value="BOT_X2">X2</option>
+          <option value="BOT_X3">X3</option>
+          <option value="BOT_EWO_MTF">MTF</option>
+          <option value="BOT_EWO_MTFH">MTFH</option>
+        </select>
         <input type="text" id="log-search" placeholder="🔍 بحث..." style="width:80px;padding:2px 4px;font-size:10px" oninput="renderLogs()">
         <button class="icon-btn" style="background:#334155;color:#fff" title="نسخ" onclick="copyLogs()">📋</button>
       </div>
@@ -328,6 +349,7 @@ th{color:var(--sub)}
         <button class="btn log-filter-btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('buys', this)">🚀 شراء</button>
         <button class="btn log-filter-btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('sells', this)">💰 بيع</button>
         <button class="btn log-filter-btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('orders', this)">📤 أوامر</button>
+        <button class="btn log-filter-btn" style="background:#151e30;color:var(--sub);font-size:9.5px" onclick="setLogFilter('errors', this)">🚨 أخطاء</button>
       </div>
       <div class="logs" id="logs"></div>
     </div>
@@ -473,6 +495,22 @@ function setLogFilter(cat, btn){
   renderLogs();
 }
 
+function logMatchesBot(msg, botKey){
+  if(!botKey || botKey === 'all') return true;
+  var m = String(msg || '');
+  if(botKey === 'SNIPER'){
+    return /قناص|sniper|snp|SNIPER_/i.test(m);
+  }
+  return m.indexOf('[' + botKey + ']') >= 0;
+}
+
+function isErrorLog(l){
+  if(!l) return false;
+  if(l.type === 'danger' || l.type === 'warning') return true;
+  var msg = String(l.msg || '');
+  return /❌|🚨|خطأ|فشل|oversold|chase_fallback/i.test(msg);
+}
+
 function copyLogs(){
   navigator.clipboard.writeText(logsText).then(function(){ alert("✅ تم نسخ السجلات!"); });
 }
@@ -480,6 +518,8 @@ function copyLogs(){
 function renderLogs(){
   var searchEl = document.getElementById('log-search');
   var searchQ = (searchEl && searchEl.value || '').toLowerCase();
+  var botSel = document.getElementById('log-bot-filter');
+  var botKey = botSel ? botSel.value : 'all';
   var lHtml = '';
   logsText = '';
 
@@ -487,13 +527,16 @@ function renderLogs(){
     var cat = l.cat || 'system';
     var msg = l.msg || '';
     var msgLower = msg.toLowerCase();
-    var isSniper = /قناص|sniper|snp/i.test(msg);
+    var isSniper = /قناص|sniper|snp|SNIPER_/i.test(msg);
 
-    if(currentLogFilter === 'sniper'){
+    if(currentLogFilter === 'errors'){
+      if(!isErrorLog(l)) return;
+    } else if(currentLogFilter === 'sniper'){
       if(!isSniper) return;
     } else if(currentLogFilter !== 'all' && cat !== currentLogFilter){
       return;
     }
+    if(!logMatchesBot(msg, botKey)) return;
     if(searchQ && !msgLower.includes(searchQ) && !cat.includes(searchQ)) return;
 
     var typeColor = '#f3f4f6';
@@ -505,7 +548,8 @@ function renderLogs(){
     lHtml += '<div class="log-item"><span style="color:var(--sub)">[' + l.time + ']</span> <span style="color:' + typeColor + '">' + msg + '</span></div>';
     logsText += '[' + l.time + '] ' + msg + '\n';
   });
-  document.getElementById('logs').innerHTML = lHtml || '<div style="color:var(--sub);text-align:center">لا توجد أحداث</div>';
+  var logsEl = document.getElementById('logs');
+  if(logsEl) logsEl.innerHTML = lHtml || '<div style="color:var(--sub);text-align:center">لا توجد أحداث</div>';
 }
 
 function updatePanelPrice(){
@@ -707,6 +751,11 @@ async function updateSniperPositions(){
       document.getElementById('snp-closed-table').querySelector('tbody').innerHTML = clH || '<tr><td colspan="9" style="text-align:center;color:var(--sub)">لا توجد صفقات مغلقة</td></tr>';
       document.getElementById('snp-daily-pnl').innerText = (dayPnl >= 0 ? '+' : '') + dayPnl.toFixed(3) + ' $';
       document.getElementById('snp-daily-pnl').style.color = dayPnl >= 0 ? 'var(--success)' : 'var(--danger)';
+      const closedHeaderEl = document.getElementById('snp-closed-pnl-header');
+      if(closedHeaderEl){
+        closedHeaderEl.innerText = (dayPnl >= 0 ? '+' : '') + dayPnl.toFixed(3) + ' $';
+        closedHeaderEl.style.color = dayPnl >= 0 ? 'var(--success)' : 'var(--danger)';
+      }
     });
 
   }catch(e){}
@@ -759,22 +808,23 @@ function sortTable(tableId, colIdx){
   const table = document.getElementById(tableId);
   if(!table) return;
   const tbody = table.querySelector('tbody');
-  const rows = Array.from(tbody.querySelectorAll('tr'));
+  const rows = Array.from(tbody.querySelectorAll('tr')).filter(r => r.children.length > 1 && !r.querySelector('td[colspan]'));
   if(rows.length <= 1) return;
 
   const isAsc = table.getAttribute('data-sort-dir') !== 'asc';
   table.setAttribute('data-sort-dir', isAsc ? 'asc' : 'desc');
+  table.setAttribute('data-sort-col', String(colIdx));
 
   rows.sort((a, b) => {
-    const aText = a.children[colIdx] ? a.children[colIdx].innerText.replace(/[$%+]/g, '').trim() : '';
-    const bText = b.children[colIdx] ? b.children[colIdx].innerText.replace(/[$%+]/g, '').trim() : '';
+    const aText = a.children[colIdx] ? a.children[colIdx].innerText.replace(/[$%,]/g, '').replace(/\([^)]*\)/g, '').trim() : '';
+    const bText = b.children[colIdx] ? b.children[colIdx].innerText.replace(/[$%,]/g, '').replace(/\([^)]*\)/g, '').trim() : '';
     const aNum = parseFloat(aText);
     const bNum = parseFloat(bText);
 
-    if(!isNaN(aNum) && !isNaN(bNum)){
+    if(!isNaN(aNum) && !isNaN(bNum) && /[-+]?\d/.test(aText) && /[-+]?\d/.test(bText)){
       return isAsc ? aNum - bNum : bNum - aNum;
     }
-    return isAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+    return isAsc ? aText.localeCompare(bText, 'ar') : bText.localeCompare(aText, 'ar');
   });
 
   rows.forEach(r => tbody.appendChild(r));
