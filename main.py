@@ -1273,7 +1273,8 @@ def trading_engine_loop():
                 sl_price = entry * (1.0 - sp.get("sl_pct", 0.010))
 
                 if not sp.get("tp1_hit") and (highest >= tp1_price):
-                    half_qty = float(format_quantity(sym, sp["qty"] * 0.5))
+                    avail = refresh_asset_balance_from_exchange(base_asset)
+                    half_qty = float(format_quantity(sym, min(sp["qty"] * 0.5, avail)))
                     if half_qty > 0:
                         ok, res = place_order(sym, "SELL", qty=half_qty, order_type="MARKET")
                         if ok:
@@ -1294,6 +1295,7 @@ def trading_engine_loop():
                             sp["qty"] -= sold_qty
                             database.update_sniper_trade(sp["id"], {"tp1_hit": 1, "qty": sp["qty"]})
                             add_log(f"🎯 [{prof_name}] بيع 50% لـ {sym} عند {fmt_usd(real_exit)}$ | ربح: {net_pnl:+.3f}$ وتأمين الدخول", "sells", "success")
+                            refresh_asset_balance_from_exchange(base_asset)
 
                 effective_sl = entry if sp.get("tp1_hit") else sl_price
                 cb_pct = sp.get("trailing_cb", 0.006)
