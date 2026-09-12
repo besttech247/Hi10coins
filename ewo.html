@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover"><title>شارتات EWO</title>
+<style>
+:root{--bg:#090d16;--card:#111827;--border:#1f293d;--primary:#3b82f6;--success:#10b981;--danger:#ef4444;--text:#f3f4f6;--sub:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif}
+body{background:var(--bg);color:var(--text);line-height:1.4;padding:8px;padding-top:max(8px,env(safe-area-inset-top));padding-bottom:max(8px,env(safe-area-inset-bottom));padding-left:max(8px,env(safe-area-inset-left));padding-right:max(8px,env(safe-area-inset-right))}
+.app-header{display:flex;flex-direction:column;gap:4px;padding:6px 8px;background:var(--card);border-radius:8px;border:1px solid var(--border);margin-bottom:6px}
+.app-header-top{display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap}
+.app-header-title{font-size:12px;font-weight:700;line-height:1.2;display:inline}
+.app-header-meta{font-size:9px;color:var(--sub);margin-right:6px;display:inline}
+.app-header-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
+.app-nav{display:flex;flex-wrap:nowrap;gap:3px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:thin;padding-bottom:2px}
+.app-nav a{flex:0 0 auto;min-width:76px;display:block;text-align:center;text-decoration:none;font-size:10px;font-weight:700;padding:5px 8px;border-radius:5px;background:#151e30;border:1px solid var(--border);color:var(--sub);white-space:nowrap}
+.app-nav a.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
+.btn{padding:6px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:11px}
+input,select{background:#090d16;border:1px solid var(--border);color:#fff;padding:6px;border-radius:6px;font-size:11px;width:100%}
+.toolbar{display:grid;grid-template-columns:1.4fr 1fr auto;gap:6px;align-items:end}
+.charts{display:grid;grid-template-columns:1fr;gap:8px}
+@media(min-width:900px){.charts{grid-template-columns:1fr 1fr}}
+.chart-card{background:#0b1220;border:1px solid var(--border);border-radius:10px;padding:8px}
+.chart-head{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px}
+.chart-head strong{font-size:12px}
+.badge{font-size:9px;padding:2px 6px;border-radius:999px;border:1px solid var(--border);color:var(--sub)}
+.badge.ok{color:#86efac;border-color:#166534;background:#052e16}
+.badge.warn{color:#fde68a;border-color:#854d0e;background:#422006}
+.badge.off{color:var(--sub)}
+.chart-wrap{position:relative;height:160px}
+.meta{font-size:10px;color:var(--sub);margin-top:4px}
+.header-status{font-size:10px;padding:3px 6px;border-radius:999px;background:#151e30;border:1px solid var(--border)}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-header-top">
+      <div style="min-width:0">
+        <span class="app-header-title">📈 شارتات EWO</span>
+        <span class="app-header-meta" id="price-meta">—</span>
+      </div>
+      <div class="app-header-actions">
+        <span class="header-status" id="load-stat">جاهز</span>
+        <button class="btn" style="background:#334155;color:#fff" onclick="fetch('/api/logout').then(function(){location.href='/login'})">🚪</button>
+      </div>
+    </div>
+    <nav class="app-nav" aria-label="التنقل الرئيسي">
+      <a href="/">🏠 الرئيسية</a>
+      <a href="/sniper">🎯 القناص</a>
+      <a href="/ewo" class="active">📈 EWO</a>
+      <a href="/analytics">📊 يدوي</a>
+    </nav>
+  </header>
+
+  <div class="card">
+    <div class="toolbar">
+      <div>
+        <label style="font-size:10px;color:var(--sub)">العملة</label>
+        <select id="sym-select"></select>
+      </div>
+      <div>
+        <label style="font-size:10px;color:var(--sub)">أو اكتب رمزًا</label>
+        <input type="text" id="sym-input" placeholder="ETHUSDT" value="ETHUSDT">
+      </div>
+      <button class="btn" style="background:var(--primary);color:#fff" onclick="loadCharts()">تحديث</button>
+    </div>
+    <div class="meta" style="margin-top:6px">6 فريمات: 5m · 15m · 30m · 1h · 4h · 1d — نفس منطق EWO في المحرك</div>
+  </div>
+
+  <div class="charts" id="charts-root"></div>
+
+<script>
+var TF_ORDER = [
+  {key:'5m', label:'5m'},
+  {key:'15m', label:'15m'},
+  {key:'30m', label:'30m'},
+  {key:'60m', label:'1h'},
+  {key:'4h', label:'4h'},
+  {key:'1d', label:'1d'}
+];
+var charts = {};
+
+function esc(s){ return String(s == null ? '' : s); }
+
+function buildChartCards(){
+  var root = document.getElementById('charts-root');
+  root.innerHTML = TF_ORDER.map(function(tf){
+    return '<div class="chart-card">' +
+      '<div class="chart-head">' +
+        '<strong>' + tf.label + '</strong>' +
+        '<span class="badge off" id="badge-' + tf.key + '">—</span>' +
+      '</div>' +
+      '<div class="chart-wrap"><canvas id="c-' + tf.key + '"></canvas></div>' +
+      '<div class="meta" id="meta-' + tf.key + '">بانتظار البيانات…</div>' +
+    '</div>';
+  }).join('');
+}
+
+function destroyCharts(){
+  Object.keys(charts).forEach(function(k){
+    try{ charts[k].destroy(); }catch(e){}
+  });
+  charts = {};
+}
+
+function statusBadge(tfData){
+  if(!tfData || !tfData.count) return {cls:'off', text:'لا بيانات'};
+  if(tfData.rebound) return {cls:'ok', text:'إشارة ارتداد'};
+  if(tfData.supportive) return {cls:'ok', text:'داعم'};
+  return {cls:'warn', text:'غير داعم'};
+}
+
+function renderTf(tfKey, label, tfData){
+  var badge = statusBadge(tfData);
+  var bEl = document.getElementById('badge-' + tfKey);
+  if(bEl){ bEl.className = 'badge ' + badge.cls; bEl.textContent = badge.text; }
+  var mEl = document.getElementById('meta-' + tfKey);
+  if(mEl){
+    if(!tfData || !tfData.count){
+      mEl.textContent = 'تعذر جلب الشموع';
+    } else {
+      var e1 = tfData.e1 == null ? '—' : Number(tfData.e1).toFixed(4);
+      var e2 = tfData.e2 == null ? '—' : Number(tfData.e2).toFixed(4);
+      var e3 = tfData.e3 == null ? '—' : Number(tfData.e3).toFixed(4);
+      mEl.textContent = 'EWO e1=' + e1 + ' · e2=' + e2 + ' · e3=' + e3 + ' · شموع=' + tfData.count;
+    }
+  }
+
+  var labels = (tfData && tfData.times) ? tfData.times.map(function(t, i){ return i; }) : [];
+  var ewo = (tfData && tfData.ewo) ? tfData.ewo.map(function(v){ return v == null ? null : v; }) : [];
+  var colors = ewo.map(function(v){
+    if(v == null) return 'rgba(148,163,184,0.2)';
+    return v >= 0 ? 'rgba(16,185,129,0.85)' : 'rgba(239,68,68,0.85)';
+  });
+
+  var ctx = document.getElementById('c-' + tfKey);
+  if(!ctx || typeof Chart === 'undefined') return;
+  if(charts[tfKey]){ try{ charts[tfKey].destroy(); }catch(e){} }
+
+  charts[tfKey] = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'EWO ' + label,
+        data: ewo,
+        backgroundColor: colors,
+        borderWidth: 0,
+        barPercentage: 1.0,
+        categoryPercentage: 1.0
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: function(items){
+              var i = items[0] && items[0].dataIndex;
+              var t = tfData && tfData.times ? tfData.times[i] : '';
+              return t ? String(t) : '';
+            },
+            label: function(item){
+              var v = item.raw;
+              return 'EWO: ' + (v == null ? '—' : Number(v).toFixed(5));
+            }
+          }
+        }
+      },
+      scales: {
+        x: { display: false },
+        y: {
+          ticks: { color: '#94a3b8', font: { size: 9 }, maxTicksLimit: 5 },
+          grid: { color: 'rgba(31,41,61,0.9)' }
+        }
+      }
+    }
+  });
+}
+
+async function populateSymbols(){
+  var sel = document.getElementById('sym-select');
+  var set = {};
+  try{
+    var r = await fetch('/api/data');
+    var d = await r.json();
+    Object.keys(d.bots || {}).forEach(function(b){
+      (d.bots[b].symbols || []).forEach(function(s){ set[s] = true; });
+    });
+  }catch(e){}
+  ['BTCUSDT','ETHUSDT','SOLUSDT'].forEach(function(s){ set[s] = true; });
+  var list = Object.keys(set).sort();
+  sel.innerHTML = list.map(function(s){ return '<option value="' + s + '">' + s + '</option>'; }).join('');
+  if(list.indexOf('ETHUSDT') >= 0) sel.value = 'ETHUSDT';
+  document.getElementById('sym-input').value = sel.value;
+  sel.onchange = function(){ document.getElementById('sym-input').value = sel.value; loadCharts(); };
+}
+
+async function loadCharts(){
+  var sym = (document.getElementById('sym-input').value || document.getElementById('sym-select').value || 'ETHUSDT').trim().toUpperCase();
+  if(sym && !/USDT$|USDC$/.test(sym)) sym += 'USDT';
+  document.getElementById('sym-input').value = sym;
+  document.getElementById('load-stat').textContent = 'تحميل...';
+  try{
+    var r = await fetch('/api/ewo_chart?symbol=' + encodeURIComponent(sym) + '&limit=80');
+    var d = await r.json();
+    if(d.error) throw new Error(d.error);
+    var bid = d.bid, ask = d.ask;
+    document.getElementById('price-meta').textContent = d.symbol + (bid ? (' · bid ' + Number(bid).toFixed(4) + '$') : '');
+    TF_ORDER.forEach(function(tf){
+      renderTf(tf.key, tf.label, (d.timeframes || {})[tf.key]);
+    });
+    document.getElementById('load-stat').textContent = 'تم';
+  }catch(e){
+    document.getElementById('load-stat').textContent = 'خطأ';
+    alert('فشل تحميل الشارتات: ' + e.message);
+  }
+}
+
+buildChartCards();
+populateSymbols().then(loadCharts);
+setInterval(function(){ if(!document.hidden) loadCharts(); }, 30000);
+</script>
+</body>
+</html>
