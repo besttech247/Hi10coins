@@ -2064,6 +2064,36 @@ class WebHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body.encode('utf-8'))
 
+        elif self.path == '/api/download_db':
+            import tempfile
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            fname = f"bot_data_{ts}.db"
+            tmp_path = None
+            try:
+                fd, tmp_path = tempfile.mkstemp(prefix="bot_data_dl_", suffix=".db")
+                os.close(fd)
+                database.create_db_snapshot(tmp_path)
+                with open(tmp_path, "rb") as f:
+                    payload = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/octet-stream')
+                self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                add_log(f"⬇️ تم تنزيل نسخة قاعدة البيانات ({fname})", "system", "info")
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(json.dumps({"msg": f"فشل تنزيل القاعدة: {e}"}, ensure_ascii=False).encode('utf-8'))
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
         elif self.path == '/sniper':
             try:
                 with open("sniper.html", "r", encoding="utf-8") as f:

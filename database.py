@@ -551,3 +551,24 @@ def change_password(new_password):
     conn.commit()
     conn.close()
     return True
+
+def create_db_snapshot(dest_path):
+    """Consistent SQLite snapshot safe to download while the app is running."""
+    _ensure_db_location()
+    if not os.path.exists(DB_FILE):
+        raise FileNotFoundError(f"DB not found: {DB_FILE}")
+    dest_dir = os.path.dirname(dest_path) or "."
+    os.makedirs(dest_dir, exist_ok=True)
+    src = sqlite3.connect(DB_FILE)
+    try:
+        dst = sqlite3.connect(dest_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    return dest_path
+
+def get_db_path():
+    return DB_FILE

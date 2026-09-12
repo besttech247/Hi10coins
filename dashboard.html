@@ -87,9 +87,13 @@ summary{padding:8px 10px;cursor:pointer;font-weight:bold;background:#151e30;font
         <input type="password" id="m-sec" placeholder="API Secret">
       </div>
       <button class="btn" style="background:var(--primary);color:#fff;width:100%;margin-bottom:6px" onclick="saveKeys()">💾 حفظ المفاتيح</button>
-      <div style="display:grid;grid-template-columns:1fr auto;gap:4px">
+      <div style="display:grid;grid-template-columns:1fr auto;gap:4px;margin-bottom:6px">
         <input type="password" id="new-pass" placeholder="كلمة المرور الجديدة">
         <button class="btn" style="background:#10b981;color:#fff" onclick="changePass()">تحديث 🔒</button>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:6px;margin-top:2px">
+        <div style="font-size:10px;color:var(--sub);margin-bottom:4px">نسخة احتياطية من SQLite (صفقات/إعدادات). تحتوي أيضاً على مفاتيح API — لا تشارك الملف.</div>
+        <button class="btn" style="background:#7c3aed;color:#fff;width:100%" onclick="downloadDatabase()">⬇️ تحميل قاعدة البيانات</button>
       </div>
     </div>
   </details>
@@ -508,6 +512,11 @@ async function changePass(){
   if(!p){ alert("أدخل كلمة المرور"); return; }
   var res = await fetch('/api/change_password', {method:'POST', body:JSON.stringify({new_password:p})});
   if(res.ok){ alert("✅ تم التغيير!"); document.getElementById('new-pass').value = ''; }
+}
+
+function downloadDatabase(){
+  if(!confirm("تحميل نسخة من قاعدة البيانات؟\nالملف يحتوي مفاتيح API — لا تشاركه.")) return;
+  window.location.href = '/api/download_db';
 }
 
 async function addCoinToBot(botName){
